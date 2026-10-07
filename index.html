@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>小球角斗场 · 斗蛐蛐</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div class="app" id="app"></div>
+
+  <!-- 启动失败提示：ES 模块在 file:// 下会被浏览器拦截，这时页面本来是全白的。
+       这里给出一条明确的自救指引，避免"打不开但不知道为什么"。 -->
+  <noscript>
+    <div style="max-width:640px;margin:60px auto;padding:24px;background:#fbf9f2;
+                border:1px solid #ddd7c8;border-radius:12px;font:15px/1.7 'Microsoft YaHei',sans-serif">
+      <b>需要启用 JavaScript</b><br>请在浏览器设置中允许本站运行脚本后刷新。
+    </div>
+  </noscript>
+
+  <script>
+    window.__bootFailed = false;
+    window.addEventListener('error', function (e) {
+      if (window.__bootFailed) return;
+      window.__bootFailed = true;
+      var app = document.getElementById('app');
+      var isFile = location.protocol === 'file:';
+      var detail = String((e && (e.message || e.error)) || '未知').replace(/[<>&]/g, '');
+      app.innerHTML =
+        '<div style="max-width:660px;margin:52px auto;padding:26px;background:#fbf9f2;'
+        + 'border:1px solid #ddd7c8;border-radius:12px;font:15px/1.75 Microsoft YaHei,sans-serif">'
+        + '<div style="font-size:19px;font-weight:700;margin-bottom:10px">页面没能启动</div>'
+        + (isFile
+            ? '<p style="margin:0 0 12px"><b>原因：你是直接双击打开这个文件的（地址栏以 file:// 开头）。</b></p>'
+              + '<p style="margin:0 0 12px">本游戏使用 ES 模块，浏览器的安全策略不允许从本地文件加载模块，'
+              + '所以画面会是空白的。</p>'
+              + '<p style="margin:0 0 6px"><b>解决办法（二选一）：</b></p>'
+              + '<p style="margin:0 0 6px">1. 回到 game 文件夹，双击 <b>启动预览.bat</b>，'
+              + '它会自动开好服务器并打开浏览器。</p>'
+              + '<p style="margin:0 0 12px">2. 或在命令行执行 <code>node tools/serve.mjs</code>，'
+              + '然后访问 <code>http://localhost:5173</code>。</p>'
+            : '<p style="margin:0 0 12px">页面加载时出现错误，可能是文件缺失或服务器未正确启动。</p>'
+              + '<p style="margin:0 0 12px">请确认是通过 <code>node tools/serve.mjs</code> 启动，'
+              + '并访问 <code>http://localhost:5173</code>。</p>')
+        + '<p style="margin:0;color:#7b7466;font-size:13px">错误详情：' + detail + '</p></div>';
+    });
+  </script>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "ball-arena",
+  "version": "0.1.0",
+  "private": true,
+  "description": "小球角斗场 —— 斗蛐蛐玩法框架（纯前端，单机，无需后端）",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/core.test.mjs && node tests/smoke.test.mjs",
+    "test:core": "node tests/core.test.mjs",
+    "test:ui": "node tests/smoke.test.mjs",
+    "serve": "node tools/serve.mjs"
+  },
+  "keywords": [
+    "game",
+    "autobattler",
+    "deterministic",
+    "canvas"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "linkedom": "^0.18.13",
+    "sharp": "^0.35.5"
+  }
+}

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>截图用战斗页（仅调试）</title>
+<link rel="stylesheet" href="../css/styles.css">
+<style>
+  /* 截图时固定视口，避免窗口尺寸干扰 */
+  html, body { background: #eeebe1; }
+</style>
+</head>
+<body>
+  <div class="app" id="app"></div>
+
+  <script type="module">
+    /* 这个页面只做一件事：跳过"准备"界面，直接渲染战斗界面，
+       用于 headless 浏览器截图排查渲染问题。
+       通过 URL 参数控制配置：
+         ?size=0.5      场地大小
+         ?arena=rect    场地 id
+         ?seed=123      对局种子
+         ?a=test,test   蓝队球种
+         ?b=test,test   红队球种
+         ?speed=2       初始倍速
+         ?at=120        播放头停在第几帧
+    */
+    import { ARENA_BY_ID } from '../js/arenas.js';
+    import { DEFAULT_RULES, makeUnitStats } from '../js/balls.js';
+    import { renderBattle } from '../js/ui-battle.js';
+
+    const q = new URLSearchParams(location.search);
+    const list = (k, d) => (q.get(k) ?? d).split(',').filter(Boolean);
+    const num = (k, d) => {
+      const v = Number(q.get(k));
+      return Number.isFinite(v) ? v : d;
+    };
+
+    const cfg = {
+      teams: [
+        { units: list('a', 'test,test').map((id, i) => ({ slot: i, stats: makeUnitStats(id) })) },
+        { units: list('b', 'test,test').map((id, i) => ({ slot: 100 + i, stats: makeUnitStats(id) })) }
+      ],
+      arena: ARENA_BY_ID[q.get('arena') || 'rect'],
+      sizeScale: num('size', 0.5),
+      rules: { ...DEFAULT_RULES },
+      playerSlot: null
+    };
+
+    const root = document.getElementById('app');
+    renderBattle(root, cfg, () => {});
+
+    // 播放头定位到指定帧，方便截取"交战瞬间"
+    const at = num('at', -1);
+    if (at >= 0) {
+      // 播放条是唯一能精确定位播放头的公开入口
+      const seek = root.querySelector('#btSeek');
+      if (seek) {
+        seek.value = String(at);
+        seek.dispatchEvent(new window.Event('input', { bubbles: true }));
+      }
+    }
+    // 默认暂停，保证截图稳定
+    if (q.get('play') !== '1') {
+      const btn = root.querySelector('#btPlay');
+      // 初始是播放中，点一下即为暂停
+      setTimeout(() => { if (btn && btn.textContent.includes('暂停')) btn.click(); }, 60);
+    }
+    document.title = '截图用战斗页 · 已就绪';
+  </script>
+</body>
+</html>

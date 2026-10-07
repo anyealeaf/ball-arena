@@ -1,0 +1,245 @@
+/* ============================================================
+   styles.css — 全局样式（方格纸手绘风）
+   ============================================================ */
+
+:root {
+  --paper: #fbf9f2;
+  --paper2: #f5f2e8;
+  --line: #ddd7c8;
+  --line2: #e9e4d6;
+  --ink: #221f18;
+  --muted: #7b7466;
+  --accent: #221f18;
+  --ok: #159c6b;
+  --warn: #d97706;
+  --bad: #c0392b;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: #eeebe1;
+  color: var(--ink);
+  font: 14.5px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+button { font: inherit; cursor: pointer; }
+input, select, textarea { font: inherit; }
+
+/* ---------- 版式 ---------- */
+.app { max-width: 1180px; margin: 0 auto; padding: 18px 16px 72px; }
+
+.topbar {
+  display: flex; align-items: center; gap: 14px;
+  margin-bottom: 18px; flex-wrap: wrap;
+}
+.brand { font-size: 17px; font-weight: 700; letter-spacing: .3px; }
+.brand small { color: var(--muted); font-weight: 400; font-size: 12.5px; margin-left: 8px; }
+.spacer { flex: 1; }
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 22px 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--line); }
+h3 { font-size: 14.5px; margin: 0 0 8px; }
+p.lead { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+
+/* ---------- 卡片与按钮 ---------- */
+.card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 14px 16px;
+}
+.card + .card { margin-top: 12px; }
+
+.btn {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  padding: 7px 14px;
+  border-radius: 8px;
+  transition: background .12s, border-color .12s;
+}
+.btn:hover { background: var(--paper2); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.primary:hover { background: #3a352a; }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 4px 10px; font-size: 13px; border-radius: 7px; }
+.btn.danger { color: var(--bad); border-color: #e8c4be; }
+
+.btnrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* 分段选择器 */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+.seg button {
+  border: 0; background: transparent; padding: 6px 12px;
+  border-right: 1px solid var(--line); color: var(--ink);
+}
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--accent); color: #fff; }
+/* 小号分段开关（技能描述 简要/详细）：塞在卡片标题行里，不能抢戏 */
+.seg.sm button { padding: 3px 9px; font-size: 12px; }
+
+/* ---------- 首页菜单 ---------- */
+.menu { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.menu-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 20px;
+  text-align: left;
+  transition: transform .12s, box-shadow .12s, border-color .12s;
+}
+.menu-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,.07); border-color: #c9c2ae; }
+.menu-card h3 { font-size: 17px; margin: 0 0 6px; }
+.menu-card p { margin: 0; color: var(--muted); font-size: 13px; }
+.menu-card .ic { font-size: 26px; margin-bottom: 8px; display: block; }
+
+/* ---------- 图鉴 ---------- */
+.codex-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+  gap: 12px;
+}
+.codex-card {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 11px;
+  padding: 12px; text-align: center; cursor: pointer;
+  transition: border-color .12s, transform .12s, box-shadow .12s;
+}
+.codex-card:hover { border-color: #c9c2ae; transform: translateY(-2px); box-shadow: 0 5px 14px rgba(0,0,0,.06); }
+.codex-card.on { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(34,31,24,.12); }
+.codex-card canvas { width: 78px; height: 78px; display: block; margin: 0 auto 6px; }
+.codex-card .nm { font-weight: 700; font-size: 14px; }
+.codex-card .sub { color: var(--muted); font-size: 11.5px; }
+.codex-card .mini { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+
+.tag {
+  display: inline-block; padding: 1px 7px; border-radius: 20px;
+  font-size: 11px; background: var(--paper2); color: var(--muted);
+  border: 1px solid var(--line2); margin: 2px 3px 0 0;
+}
+
+/* 属性表 */
+.statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.statbox { background: var(--paper2); border: 1px solid var(--line2); border-radius: 8px; padding: 7px 9px; }
+.statbox .k { font-size: 11.5px; color: var(--muted); }
+.statbox .v { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ---------- 准备界面 ---------- */
+.prep-grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; align-items: start; }
+@media (max-width: 940px) { .prep-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.arena-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+.arena-card {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px; cursor: pointer; text-align: center;
+  transition: border-color .12s, box-shadow .12s;
+}
+.arena-card:hover { border-color: #c9c2ae; }
+.arena-card.on { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(34,31,24,.12); }
+.arena-card canvas { width: 100%; height: 74px; display: block; border-radius: 6px; background: #fdfcf7; }
+.arena-card .nm { font-size: 12.5px; font-weight: 600; margin-top: 5px; }
+
+.team-block { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--paper); }
+.team-head { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; flex-wrap: wrap; }
+.team-dot { width: 13px; height: 13px; border-radius: 50%; flex: none; }
+.team-name { font-weight: 700; }
+
+.unit-row { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+.unit-row .idx { width: 20px; color: var(--muted); font-size: 12px; text-align: right; flex: none; }
+.unit-row select { flex: 1; min-width: 0; padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+
+/* ---------- 技能装配 ----------
+   每个小球单独挑选要带的技能（上限见 balls.js 的 MAX_SKILLS_PER_UNIT）。
+   按钮宽度固定，避免"技能 0/2"和"技能 10/12"来回改布局。 */
+.unit-row .skill-btn { flex: none; width: 78px; font-variant-numeric: tabular-nums; }
+.unit-row .skill-btn.has { border-color: var(--accent); font-weight: 600; }
+.unit-row .skill-btn[disabled] { opacity: .45; cursor: default; }
+
+.unit-block { margin-bottom: 6px; }
+.unit-block .unit-row { margin-bottom: 0; }
+
+.unit-skills {
+  margin: 6px 0 8px 27px; padding: 8px 10px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 8px; background: #fbfaf5;
+}
+.unit-skills-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.unit-skills-head .btn.sm { padding: 2px 8px; font-size: 12px; }
+
+.unit-skills .sk {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 0; border-top: 1px dashed var(--line2); cursor: pointer;
+}
+.unit-skills .sk input { margin-top: 3px; flex: none; }
+.unit-skills .sk .t { display: block; font-weight: 600; font-size: 13px; }
+.unit-skills .sk .d { display: block; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.unit-skills .sk.on .t { color: var(--accent); }
+.unit-skills .sk.locked { opacity: .45; cursor: default; }
+
+.chk { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; border-bottom: 1px dashed var(--line2); }
+.chk:last-child { border-bottom: 0; }
+.chk input { margin-top: 4px; flex: none; }
+.chk .t { font-weight: 600; font-size: 13.5px; }
+.chk .d { color: var(--muted); font-size: 12px; }
+
+.field { margin-bottom: 10px; }
+.field label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+.field select, .field input[type=number] {
+  width: 100%; padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+}
+
+/* ---------- 战斗界面 ---------- */
+.battle-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-items: start; }
+@media (max-width: 940px) { .battle-wrap { grid-template-columns: minmax(0, 1fr); } }
+
+/* 画布尺寸策略：
+   · 宽度填满容器（100%）；
+   · 高度由 render.js 写入的 aspect-ratio 按场地宽高比自动推出 ——
+     这样场地永远不会被拉伸，也不会出现 JS 与 CSS 两套尺寸互相打架。
+   JS 只负责绘图缓冲区（canvas.width/height），不再写 width/height 样式。
+
+   不要用 border-radius：场地画出来是直角的，画布若是圆角，
+   四个角会露出背景色，看起来就像"场地边缘和画布对不齐"。 */
+#battleCanvas {
+  display: block;
+  width: 100%;
+  background: #fdfcf7;
+  border: 1px solid #3a352a;
+}
+
+.playbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.timeline { flex: 1; min-width: 140px; }
+.timeline input[type=range] { width: 100%; }
+
+.hp-strip { display: flex; flex-direction: column; gap: 5px; }
+.hp-team { display: flex; align-items: center; gap: 8px; }
+.hp-team .nm { width: 42px; font-size: 12px; color: var(--muted); flex: none; }
+.hp-bar { flex: 1; height: 9px; background: rgba(0,0,0,.10); border-radius: 5px; overflow: hidden; }
+.hp-bar i { display: block; height: 100%; border-radius: 5px; transition: width .12s linear; }
+.hp-team .pc { width: 46px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+.log { max-height: 210px; overflow: auto; font: 12px/1.6 ui-monospace, Consolas, monospace; color: var(--muted); white-space: pre-wrap; }
+.log div { padding: 1px 0; }
+
+.result-banner {
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+  border: 1px solid var(--line); background: var(--paper);
+}
+.result-banner .big { font-size: 18px; font-weight: 700; }
+.result-banner .sm { color: var(--muted); font-size: 12.5px; }
+
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.hint { color: var(--muted); font-size: 12px; }
+.err { color: var(--bad); font-size: 13px; }
+.kbd {
+  display: inline-block; padding: 0 5px; border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 4px; background: #fff; font-size: 11.5px;
+}
+
+table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.tbl th, table.tbl td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line2); }
+table.tbl th { color: var(--muted); font-weight: 600; }
+table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
