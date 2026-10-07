@@ -9,15 +9,15 @@
 
 import { SCALE, DT, WORLD_W, WORLD_H } from './balls.js';
 import { effectiveShape, pointInZone, arenaCenter, scaleArena } from './arenas.js';
-import { getSkill, SKILL_PARAMS, CHARGE_FRAMES, DASH_FRAMES } from './skills.js';
+import { getSkill, SKILL_PARAMS, CHARGE_FRAMES, DASH_FRAMES, resolveLoadout } from './skills.js';
 
 const TWO_PI = Math.PI * 2;
 
 /* 快照步长：渲染层按这两个常数解析快照，不要再写死数字。
    改动这里就等于改动快照格式，所有读取方（render.js / ui-battle.js / 测试）会一起跟上。 */
-export const SNAP_STRIDE = 12;
+export const SNAP_STRIDE = 13;
 /* 弹道步长：
-     0 x  1 y  2 r  3 剩余寿命比例 1~0  4 颜色下标  5 kind(0 特效 / 1 实体)
+     0 x  1 y  2 r  3 剩余寿命比例 1~0  4 颜色下标  5 kind(0 特效 / 1 实体 / 2 光束)
      6 宽度  7 方向 x  8 方向 y
    方向是给激光这类"长条"弹道画拖影用的 —— 速度 1000 的激光每帧走 16 单位，
    只画一个圆点会变成断断续续的虚线。 */
@@ -40,6 +40,13 @@ export const MAX_TICK_EVENTS = 2500;
 /* 场地物件的全局上限（安全阀，见 _updateFields 的说明）。
    正常对局远达不到这个数：裁光每个晕彩最多 8 条线。 */
 export const MAX_FIELDS = 400;
+
+/* 速度下限：被减速技能叠满时也不能把球钉死在地上（那样就是"卡住"了） */
+export const MIN_SPEED = 20;
+
+/* 陀螺每层带来的每秒旋转弧度。10 层 ≈ 每秒 1.9 圈。
+   转速由层数驱动，所以"叠得越多转得越疯"是看得见的。 */
+export const SPIN_RATE_PER_STACK = 1.2;
 
 /* ------------------------------------------------------------
    定点正弦查表
@@ -360,7 +367,11 @@ function buildUnits(config, rnd) {
         kills: 0, dmg: 0, taken: 0,
         damageFrom: {},        // 按来源分类的承伤，用于战后归因
         /* 技能系统 */
-        skills: st.skills ? [...st.skills] : [],   // 技能 id 列表（引用 js/skills.js）
+        /* 技能列表：过一遍互斥整理。
+           引擎是权威口径 —— 即使界面漏了（或存档是手改的），
+           互斥的两个技能也不会同时生效，避免"界面显示装了 2 个、
+           实际只有 1 个在跑"这种两边不一致的静默故障。 */
+        skills: resolveLoadout(st.skills),
         skillCd: {},           // 各技能的剩余冷却
         hitsTaken: 0, hitsDealt: 0,  // 撞击次数统计（供"次数触发"类技能使用）
         hpBelowFired: {},      // 血量触发类技能的去重标记
@@ -375,8 +386,29 @@ function buildUnits(config, rnd) {
         /* ---------- 技能用扩展字段 ----------
            这些都是"技能系统需要但物理层不关心"的状态，
            默认值必须能表达"什么都没发生"，这样没装相关技能的球完全不受影响。 */
-        baseSpeed: Math.round(st.speed * SCALE),  // 开华前的速度，便于还原
+        /* baseSpeed / baseMelee 一律用**世界单位**（和 speedBonus / speedSlow /
+           speedPer 这些技能参数同一套单位）。
+           踩过：曾经把 baseSpeed 存成定点数（120000）而 speedBonus 是世界单位（2），
+           两者一加就成了 120002 世界单位 —— 球会瞬间飞到场地外去。
+           u.speed 仍然是定点数（物理层用），两套单位在 refreshSpeed 里对齐。 */
+        baseSpeed: st.speed,
+        baseMelee: st.melee,   // 球种原始碰撞伤害（同理，之后不再改）
+        meleeBonus: 0,         // 技能给的碰撞伤害加成（折光 +100、开华 +50）
+        spinMeleeBonus: 0,     // 陀螺逐层叠加的碰撞伤害
+        /* 速度的三种修正分开记，互不覆盖（见 setSpeed/refreshSpeed 的说明）：
+             speedOverride 绝对覆盖（开华的"速度提高到 N"）
+             speedBonus    加法加成（陀螺每层 +2）
+             speedSlow     减法减益（映霞[枯] 命中 -20，带时限） */
+        speedOverride: null,
+        speedBonus: 0,
+        speedSlow: 0,
+        speedSlowFrames: 0,
         bloomed: false,        // 是否已"开华"（形态强化）
+        /* 陀螺：被"真正的打击"时叠层，层数同时驱动回血、碰撞伤害、移速与旋转 */
+        spinStacks: 0,
+        spinAngle: 0,          // 累计旋转角（弧度）—— 渲染层用它转贴图
+        healAcc: 0,            // 回血余数累积（按"每秒 N 点"时不能每帧都取整）
+        healed: 0,             // 累计回复量（战后统计用）
         dodge: 0,              // 闪避概率 0~1（辉光领域）
         stealthFrames: 0,      // 隐身剩余帧数（折光）
         damageMul: st.damageMul ?? 1,   // 伤害倍率（析光分身 = 1/3）
@@ -587,7 +619,9 @@ export class Battle {
      小球步长 SNAP_STRIDE：
        0 x  1 y  2 hp  3 alive  4 flash  5 res  6 face
        7 mode(0 普通 / 1 蓄力 / 2 冲刺)  8 蓄力进度 0~1  9 冲刺进度 0~1
-      10 隐身中(0/1)  11 开华中(0/1)
+      10 隐身中(0/1)  11 开华中(0/1)  12 旋转角(弧度)
+       旋转角进快照而不是让渲染层自己按时间算 —— 后者在暂停/回放时会对不上，
+       和当初"场地物件没进快照"是同一类错误。
      弹道步长 PROJ_STRIDE：
        0 x  1 y  2 r  3 剩余寿命比例 1~0  4 颜色下标  5 kind(0 特效 / 1 实体)
      ------------------------------------------------------------ */
@@ -609,6 +643,7 @@ export class Battle {
       buf[o + 9] = u.dashFrames > 0 ? 1 - u.dashFrames / DASH_FRAMES : 0;
       buf[o + 10] = u.stealthFrames > 0 ? 1 : 0;
       buf[o + 11] = u.bloomed ? 1 : 0;
+      buf[o + 12] = u.spinAngle || 0;
     }
 
     // 弹道：只有存在弹道时才分配，绝大多数帧是 null
@@ -675,6 +710,22 @@ export class Battle {
       if (u.hitCd > 0) u.hitCd = Math.max(0, u.hitCd - DT);
       if (u.flash > 0) u.flash = Math.max(0, u.flash - DT);
       if (u.stealthFrames > 0) u.stealthFrames--;
+
+      /* 减速的时限（映霞[枯]：命中后移速 -20，持续 2 秒）到期就撤掉 */
+      if (u.speedSlowFrames > 0) {
+        u.speedSlowFrames--;
+        if (u.speedSlowFrames === 0 && u.speedSlow) {
+          u.speedSlow = 0;
+          this.refreshSpeed(u);
+        }
+      }
+
+      /* 旋转（陀螺）：层数越高转得越快。角度累加在这里，
+         渲染层只读快照里的角度值 —— 这样暂停/回放时旋转也冻得住。 */
+      if (u.spinStacks > 0) {
+        u.spinAngle += SPIN_RATE_PER_STACK * u.spinStacks * DT;
+        if (u.spinAngle > Math.PI * 2000) u.spinAngle -= Math.PI * 2000;  // 防止无限增长丢精度
+      }
       // 技能冷却
       for (const id in u.skillCd) {
         if (u.skillCd[id] > 0) u.skillCd[id] = Math.max(0, u.skillCd[id] - DT);
@@ -1082,6 +1133,12 @@ export class Battle {
          这类需要跨弹道累加状态的机制。引擎自己不懂这些含义。 */
       onHit: p.onHit || null,
       onExpire: p.onExpire || null,
+      /* 打空了（撞墙或到寿命都没碰到任何球）时回调。
+         用来做"箭矢落空要掉层"这类机制 —— 引擎自己不懂什么是"落空"，
+         它只知道这个弹道一次都没命中过。 */
+      onMiss: p.onMiss || null,
+      didHit: false,
+      knockback: p.knockback || 0,   // 命中时的击退强度（世界单位/秒）
       /* 被细线吸收时的回调。用来做"魔弹被裁光的细线吃掉，也算一次命中计数"
          这类跨技能联动 —— 引擎自己不懂这些含义。 */
       onAbsorb: p.onAbsorb || null,
@@ -1128,6 +1185,8 @@ export class Battle {
       if (p.life <= 0) {
         p.alive = false;
         if (p.onExpire) p.onExpire(this, p);
+        /* 到寿命都没碰到任何球 = 打空了 */
+        if (!p.didHit && p.onMiss) p.onMiss(this, this.units[p.owner] || null, p);
         this._emit('projExpire', null, null, 0, { px: p.x / SCALE, py: p.y / SCALE, tag: p.tag });
         continue;
       }
@@ -1184,6 +1243,8 @@ export class Battle {
           continue;
         }
         p.alive = false;
+        /* 撞墙而死、且一次都没命中 = 打空了（"箭矢落空"就是这个） */
+        if (!p.didHit && p.onMiss) p.onMiss(this, this.units[p.owner] || null, p);
         this._emit('projWall', null, null, 0, { px: (c.x) / SCALE, py: (c.y) / SCALE, color: p.color, tag: p.tag });
         continue;
       }
@@ -1202,7 +1263,16 @@ export class Battle {
         this._emit('projHit', null, u, p.damage, {
           px: p.x / SCALE, py: p.y / SCALE, color: p.color, tag: p.tag
         });
+        p.didHit = true;
         if (p.onHit) p.onHit(this, from, u, p);
+        /* 命中时的击退：沿飞行方向把目标推开一点 */
+        if (p.knockback) {
+          const d = Math.hypot(p.vx, p.vy) || 1;
+          const kb = p.knockback * SCALE;
+          u.vx = Math.round((p.vx / d) * kb);
+          u.vy = Math.round((p.vy / d) * kb);
+          this._emit('knock', from, u, p.knockback);
+        }
         /* 穿透弹记下打过的目标，然后**继续**检查同一帧里的其他目标；
            普通弹道打中一个就地消失。 */
         if (p.pierce) { p.hitIds.add(u.id); continue; }
@@ -1413,7 +1483,7 @@ export class Battle {
       r: Math.round((stats.r ?? owner.r / SCALE) * SCALE),
       mass: Math.max(1, Math.round((stats.r ?? owner.r / SCALE) ** 2)),
       speed: Math.round((stats.speed ?? owner.speed / SCALE) * SCALE),
-      baseSpeed: Math.round((stats.speed ?? owner.speed / SCALE) * SCALE),
+      baseSpeed: (stats.speed ?? owner.speed / SCALE),   // 世界单位，见 buildUnits 的说明
       melee: stats.melee ?? 0,
       reach: 0,
       resMax: 0, res: 0, resDef: null,
@@ -1426,11 +1496,14 @@ export class Battle {
       respawnAt: 0, hitCd: 0, flash: 0,
       kills: 0, dmg: 0, taken: 0,
       damageFrom: {},
-      skills: stats.skills ? [...stats.skills] : [],
+      skills: stats.skills ? resolveLoadout(stats.skills) : [],
       skillCd: {}, hitsTaken: 0, hitsDealt: 0, hpBelowFired: {},
       mode: 'normal', chargeFrames: 0, dashFrames: 0, dashVx: 0, dashVy: 0,
       dashHits: new Set(), cd: {}, flags: {},
       bloomed: false, dodge: 0, stealthFrames: 0,
+      baseMelee: stats.melee ?? 0, meleeBonus: 0, spinMeleeBonus: 0,
+      speedOverride: null, speedBonus: 0, speedSlow: 0, speedSlowFrames: 0,
+      spinStacks: 0, spinAngle: 0, healAcc: 0, healed: 0,
       damageMul: stats.damageMul ?? 1,
       lightBonus: 0,
       summoner: owner.id,
@@ -1463,6 +1536,25 @@ export class Battle {
     return Math.max(1, Math.round(unit.melee * (unit.damageMul ?? 1)));
   }
 
+  /* ---------- 回复 ----------
+     按"每秒 N 点"回复时不能每帧取整 —— 20/60 = 0.33，取整后每帧都是 0，
+     一滴血都回不上。所以用余数累积，攒够 1 点才真的加。 */
+  _heal(unit, amount) {
+    if (!unit || !unit.alive || amount <= 0) return 0;
+    unit.healAcc += amount;
+    const whole = Math.floor(unit.healAcc);
+    if (whole <= 0) return 0;
+    unit.healAcc -= whole;
+    const before = unit.hp;
+    unit.hp = Math.min(unit.maxHp, unit.hp + whole);
+    const got = unit.hp - before;
+    if (got > 0) {
+      unit.healed += got;
+      this._emit('heal', null, unit, got);
+    }
+    return got;
+  }
+
   /** 只按倍率缩放、**不加**"光"加成。
       用途：裁光质点/细线的"每帧 1~2 点"接触伤害。
       开华的 +50 是加在"一次攻击"上的，如果每帧都 +50，
@@ -1476,6 +1568,53 @@ export class Battle {
     const c = clampToShape(this.shape(), Math.round(x * SCALE), Math.round(y * SCALE),
       Math.round(r * SCALE));
     return { x: c.x / SCALE, y: c.y / SCALE };
+  }
+
+  /* ---------- 速度模型：基础速度 + 加成/减益 ----------
+     小球的实际移动用的是速度向量 vx/vy，而那是开局按 speed 定好的；
+     之后只有碰撞、撞墙反射、转向修正会动它（且都保持速率不变）。
+     所以技能要"提速/减速"**必须走这里**，不能只写 u.speed。
+
+     这个坑真实发生过：晕彩开华的"速度提高到 150"从一开始就没生效，
+     直到给桃夭做"每层 +2 移速"时才被测出来。
+
+     三个来源分开记，互不覆盖：
+       baseSpeed      球种原始速度（出生时定，不再改）
+       speedOverride  绝对覆盖（开华那种"提高到 N"）
+       speedBonus     加法加成（陀螺每层 +2）
+       speedSlow      减法减益（映霞[枯] 命中 -20，带时限）
+     最终 = (override ?? base) + bonus + slow，再夹一个下限防止被减到 0。
+     ------------------------------------------------------------ */
+
+  /** 只改"当前速度"本身，并同步缩放速度向量（方向不变） */
+  setSpeed(unit, worldSpeed) {
+    unit.speed = Math.round(worldSpeed * SCALE);
+    const cur = Math.hypot(unit.vx, unit.vy);
+    if (cur > 0) {
+      const k = unit.speed / cur;
+      unit.vx = Math.round(unit.vx * k);
+      unit.vy = Math.round(unit.vy * k);
+    }
+    /* 速度为 0 的情况（蓄力中）不用管：状态机恢复速度时会读 u.speed */
+    return unit.speed;
+  }
+
+  /** 按"基础 + 覆盖 + 加成 + 减益"重算当前速度，并同步速度向量 */
+  refreshSpeed(unit) {
+    const base = (unit.speedOverride != null) ? unit.speedOverride : (unit.baseSpeed || 0);
+    const target = Math.max(MIN_SPEED, base + (unit.speedBonus || 0) + (unit.speedSlow || 0));
+    if (unit.speed !== Math.round(target * SCALE)) this.setSpeed(unit, target);
+    return target;
+  }
+
+  /* ---------- 碰撞伤害：同样是"基础 + 加成" ----------
+     撞伤必须走这里，不能直接 `u.melee += 50`：
+     陀螺每叠一层都要重算，直接加会把折光的 +100 反复累加进去
+     （叠 10 层就变成 100 + 10×2 + 100×10 这种莫名其妙的数）。 */
+  refreshMelee(unit) {
+    unit.melee = Math.max(0,
+      (unit.baseMelee || 0) + (unit.meleeBonus || 0) + (unit.spinMeleeBonus || 0));
+    return unit.melee;
   }
 
 
@@ -2098,6 +2237,14 @@ export class Battle {
     }
 
     if (!opts.quiet) this._emit('hit', from, to, dmg, { kind, light: (opts.traits || []).includes('light') });
+
+    /* "被真正的打击命中"钩子。
+       区分得很重要：裁光质点/细线的**每帧接触伤害**和场地灼烧都不算
+       "被打了一下" —— 一秒 60 次的接触伤害如果每次都触发"被攻击"类效果，
+       任何"被攻击时叠层"的技能都会瞬间叠满，等于没有设计。
+       所以只有一次性打击（近战、弹道、爆炸）才置 heavy。 */
+    const heavy = !opts.quiet && kind !== 'zone';
+    this._runHooks(to, 'onDamaged', { from, amount: dmg, kind, heavy });
 
     if (to.hp <= 0) {
       to.hp = 0;

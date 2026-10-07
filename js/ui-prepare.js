@@ -10,7 +10,7 @@ import {
   TIME_LIMIT_OPTIONS, MAX_TEAMS, teamColor, makeUnitStats,
   MAX_SKILLS_PER_UNIT, defaultSkillsFor, normalizeSkills
 } from './balls.js';
-import { getSkill, skillDesc } from './skills.js';
+import { getSkill, skillDesc, resolveLoadout, conflictsWithChosen } from './skills.js';
 import { getSkillDetail, setSkillDetail, onPrefsChange } from './prefs.js';
 import { ARENAS, ARENA_BY_ID, zoneLabel, effectLabels } from './arenas.js';
 import { sketchArena, sketchBall } from './sketch.js';
@@ -357,13 +357,19 @@ export function renderPrepare(root, onStart) {
         ${owned.map(id => {
           const sk = getSkill(id);
           const on = equipped.includes(id);
-          // 已达上限时，未勾选的置灰 —— 从源头避免"点了却没生效"的困惑
-          const locked = !on && full;
+          /* 两种置灰的理由不一样，提示也不一样：
+             ① 已达装配上限；② 与已选的另一个技能互斥（映霞[荣]/[枯]）。
+             把理由写在标题里，否则玩家只看到"点不动"，会以为是 bug。 */
+          const conflict = conflictsWithChosen(id, equipped);
+          const full = equipped.length >= MAX_SKILLS_PER_UNIT;
+          const locked = !on && (full || conflict);
+          const why = conflict ? '与已选技能互斥'
+            : (locked ? `最多只能装 ${MAX_SKILLS_PER_UNIT} 个` : '');
           return `
-            <label class="sk${on ? ' on' : ''}${locked ? ' locked' : ''}">
+            <label class="sk${on ? ' on' : ''}${locked ? ' locked' : ''}"${why ? ` title="${why}"` : ''}>
               <input type="checkbox" data-skill="${id}"${on ? ' checked' : ''}${locked ? ' disabled' : ''}>
               <span>
-                <span class="t">${skillNamesOf(id)}</span>
+                <span class="t">${skillNamesOf(id)}${conflict ? ' <span class="mini">· 与已选互斥</span>' : ''}</span>
                 <span class="d">${sk ? skillDesc(sk, useDetail) : '（技能表里找不到这个 id）'}</span>
               </span>
             </label>`;
@@ -382,7 +388,8 @@ export function renderPrepare(root, onStart) {
           if (cb.checked) {
             if (cur.includes(id)) return;
             if (cur.length >= MAX_SKILLS_PER_UNIT) { cb.checked = false; return; }  // 双保险
-            state.loadouts[t][i] = [...cur, id];
+            if (conflictsWithChosen(id, cur)) { cb.checked = false; return; }       // 互斥双保险
+            state.loadouts[t][i] = resolveLoadout([...cur, id]);
           } else {
             state.loadouts[t][i] = cur.filter(x => x !== id);
           }
@@ -390,7 +397,8 @@ export function renderPrepare(root, onStart) {
         };
       });
       panel.querySelector('[data-act=all]').onclick = () => {
-        state.loadouts[t][i] = owned.slice(0, MAX_SKILLS_PER_UNIT);
+        /* "全部"也要过互斥整理：直接 slice 会把互斥的两个都装上 */
+        state.loadouts[t][i] = resolveLoadout(owned).slice(0, MAX_SKILLS_PER_UNIT);
         save(); drawTeams(); drawSummary();
       };
       panel.querySelector('[data-act=none]').onclick = () => {

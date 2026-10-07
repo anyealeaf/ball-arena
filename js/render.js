@@ -624,12 +624,76 @@ export class Renderer {
           ctx.fillText(`-${Math.round(e.value)}`, e.ax, e.ay - 18 - t * 16);
           ctx.textAlign = 'left';
         }
+      } else if (e.type === 'heal') {
+        /* 回血：绿色的小十字往上飘。和伤害的深色数字明确区分开，
+           否则会误读成"又挨打了"。 */
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.strokeStyle = '#159c6b';
+        ctx.lineWidth = 2;
+        const hy = e.by - 12 - t * 16;
+        ctx.beginPath();
+        ctx.moveTo(e.bx - 4, hy); ctx.lineTo(e.bx + 4, hy);
+        ctx.moveTo(e.bx, hy - 4); ctx.lineTo(e.bx, hy + 4);
+        ctx.stroke();
+      } else if (e.type === 'spinUp') {
+        /* 陀螺叠层：绕球转一圈短弧，层数越高弧越亮（转得也更疯） */
+        const k = Math.min(1, (e.value || 1) / 10);
+        ctx.globalAlpha = alpha * (0.4 + k * 0.5);
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.6 + k * 1.4;
+        for (let i = 0; i < 3; i++) {
+          const a0 = (frame / 60) * 6 + i * 2.1;
+          ctx.beginPath();
+          ctx.arc(e.ax, e.ay, 22, a0, a0 + 1.1);
+          ctx.stroke();
+        }
       } else if (e.type === 'projBounce') {
         // 弹射：撞墙点的小火花
         ctx.globalAlpha = alpha * 0.8;
         ctx.strokeStyle = e.color || '#f5d0fe';
         ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(e.px, e.py, 2 + t * 8, 0, Math.PI * 2); ctx.stroke();
+      } else if (e.type === 'aimStack' || e.type === 'aimMiss') {
+        /* 认真拉矢：命中叠层画向上的金色小箭头，落空掉层画向下的灰箭头 */
+        const up = e.type === 'aimStack';
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.strokeStyle = up ? '#d97706' : '#9ca3af';
+        ctx.lineWidth = 2;
+        const dy0 = e.ay - 20 - t * 14;
+        ctx.beginPath();
+        ctx.moveTo(e.ax - 4, dy0 + (up ? 4 : -4));
+        ctx.lineTo(e.ax, dy0 + (up ? -2 : 2));
+        ctx.lineTo(e.ax + 4, dy0 + (up ? 4 : -4));
+        ctx.stroke();
+      } else if (e.type === 'arrowBurst') {
+        // 五连发：从球心炸开五道扇形短线
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.strokeStyle = '#f9a8d4';
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 5; i++) {
+          const a = -Math.PI / 2 + (i - 2) * 0.26;
+          ctx.beginPath();
+          ctx.moveTo(e.ax + Math.cos(a) * 8, e.ay + Math.sin(a) * 8);
+          ctx.lineTo(e.ax + Math.cos(a) * (20 + t * 22), e.ay + Math.sin(a) * (20 + t * 22));
+          ctx.stroke();
+        }
+      } else if (e.type === 'buffOn' || e.type === 'buffOff') {
+        /* 春景 buff 的开/关：开是向外扩散的粉环，关是向内收的暗环 */
+        const on = e.type === 'buffOn';
+        ctx.globalAlpha = alpha * (on ? 0.85 : 0.6);
+        ctx.strokeStyle = on ? '#fbcfe8' : '#9ca3af';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(e.ax, e.ay, on ? 12 + t * 30 : 30 - t * 16, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (e.type === 'slow') {
+        // 被减速：一圈向里收的灰环
+        ctx.globalAlpha = alpha * 0.75;
+        ctx.strokeStyle = '#6b7280';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(e.ax, e.ay, 26 - t * 12, 0, Math.PI * 2);
+        ctx.stroke();
       }
       ctx.restore();
     }
@@ -736,6 +800,7 @@ export class Renderer {
       const mode = d[o + 7], chargeP = d[o + 8], dashP = d[o + 9];
       const stealth = d[o + 10] > 0.5;
       const bloomed = d[o + 11] > 0.5;
+      const spin = d[o + 12] || 0;      // 旋转角（陀螺叠层驱动），暂停回放时会冻住
       const r = u.r / SCALE;
       const tc = teamColor(u.team);
 
@@ -826,6 +891,15 @@ export class Renderer {
       const useSticker = !!(st && st.ready && !st.failed);
       if (useSticker) {
         ctx.save();
+        /* 陀螺：贴图绕球心自转。
+           只转球体本身，血条与队伍色环不转 —— 否则数字会跟着翻滚，读不了。
+           旋转走 ctx.rotate 而不是"每帧重算裁剪"，因为贴图是圆形的，
+           转起来边缘不会有锯齿或缺口。 */
+        if (spin) {
+          ctx.translate(x, y);
+          ctx.rotate(spin);
+          ctx.translate(-x, -y);
+        }
         // 圆形裁剪：保证边缘干净（贴图自带遮罩，这里再兜一层保险）
         ctx.beginPath();
         ctx.arc(x, y, rr, 0, Math.PI * 2);

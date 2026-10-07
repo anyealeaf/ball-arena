@@ -651,6 +651,15 @@ console.log('\n【7】数据层');
     y.skills.length === 7 && mods.balls.defaultSkillsFor('yuncai').length === 3,
     `${y.skills.length} 个技能 → 默认 ${mods.balls.defaultSkillsFor('yuncai').join('、')}`);
   check('晕彩有开华形态的第二张贴图', !!y.stickerBloom && !!y.stickerBloom.src, y.stickerBloom && y.stickerBloom.src);
+  /* 桃夭的正式数值（作者 2026-10 设计） */
+  const ty = SPECIES_BY_ID.taoyao;
+  check('桃夭：1750 血 / 速度 120 / 碰撞 66',
+    ty.hp === 1750 && ty.speed === 120 && ty.melee === 66,
+    `HP ${ty.hp} / 速度 ${ty.speed} / 碰撞 ${ty.melee}`);
+  check('桃夭有 5 个技能，默认装配取 3 个',
+    ty.skills.length === 5 && mods.balls.defaultSkillsFor('taoyao').length === 3,
+    `${ty.skills.length} 个技能 → 默认 ${mods.balls.defaultSkillsFor('taoyao').join('、')}`);
+  check('桃夭有贴图', !!ty.sticker && !!ty.sticker.src, ty.sticker && ty.sticker.src);
   check('小球字段完整', SPECIES.every(s => s.id && s.name && s.color));
   const res = SPECIES.filter(s => s.resource);
   check('存在带特殊资源的小球（验证血条下方资源条）', res.length > 0, res.map(s => s.name).join('、'));
@@ -679,6 +688,41 @@ console.log('\n【7】数据层');
     fakePassive.map(k => k.id).join('、') || '全部有实现');
   check('存在挂了技能的小球（技能系统有实际用例）', refs.length > 0,
     refs.map(r => `${r.sp.name}:${r.id}`).join('、'));
+
+  /* ---------- 技能互斥（映霞[荣] / 映霞[枯]） ----------
+     互斥由 skills.js 的 group 声明，balls.js 只负责把默认装配的前 3 个
+     排成不冲突的组合（否则默认装出来的桃夭会自带一对互斥技能，
+     界面显示装了 3 个、引擎只认 2 个）。这几条把三层口径钉在一起。 */
+  const { resolveLoadout, conflictsWithChosen, skillGroup } = mods.skills;
+  check('映霞[荣] 与 映霞[枯] 同属一个互斥组',
+    skillGroup('taoyao_rong') === 'yingxia' && skillGroup('taoyao_ku') === 'yingxia',
+    `荣→${skillGroup('taoyao_rong')} / 枯→${skillGroup('taoyao_ku')}`);
+  const both = resolveLoadout(['taoyao_rong', 'taoyao_ku', 'taoyao_aim']);
+  check('同时装两个映霞时只保留一个',
+    both.filter(x => skillGroup(x) === 'yingxia').length === 1,
+    both.join('、'));
+  check('已选荣时枯被判为冲突（准备界面据此置灰）',
+    conflictsWithChosen('taoyao_ku', ['taoyao_rong']) &&
+    !conflictsWithChosen('taoyao_aim', ['taoyao_rong']),
+    '荣 vs 枯 = 冲突；荣 vs 认真拉矢 = 不冲突');
+  /* 通用不变量：以后加新角色 / 新技能组，默认装配也不能自带冲突。 */
+  const badDefault = SPECIES.map(sp => {
+    const d = mods.balls.defaultSkillsFor(sp.id);
+    const r = resolveLoadout(d);
+    return r.length === d.length ? null : `${sp.name}（${d.join('、')} → 只剩 ${r.join('、')}）`;
+  }).filter(Boolean);
+  check('每个球种的默认装配都没有互斥冲突', badDefault.length === 0,
+    badDefault.join('；') || `${SPECIES.length} 个球种`);
+  /* 通用不变量：用户把某球种所有技能全勾上，也不能选出同组两个。
+     （准备界面上限是 3 个，这里刻意绕过上限直接喂全量，
+       测的是"互斥"而不是"数量上限"。） */
+  const dupGroup = SPECIES.map(sp => {
+    const r = resolveLoadout(sp.skills || []);
+    const groups = r.map(skillGroup).filter(Boolean);
+    return new Set(groups).size === groups.length ? null : `${sp.name}：${r.join('、')}`;
+  }).filter(Boolean);
+  check('resolveLoadout 不会选出同组两个技能', dupGroup.length === 0,
+    dupGroup.join('；') || '全部合法');
 }
 
 console.log('\n' + log.join('\n'));

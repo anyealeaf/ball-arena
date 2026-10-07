@@ -376,20 +376,26 @@ export const SKILL_MODAN = {
   }
 };
 
+/* 折光给多少碰撞伤害。写成常量是因为 passive 里要用，
+   而 YUNCAI 对象在文件更上面，直接引用也行，这里只是让意图更清楚。 */
+const TAOYAO_ZHEGUANG_MELEE = YUNCAI.zheguang.melee;
+
 /* ------------------------------------------------------------
    ③ 折光：被动把碰撞伤害改成 100；每次近战命中后隐身 1 秒
    ------------------------------------------------------------ */
 export const SKILL_ZHEGUANG = {
   id: 'yuncai_zheguang',
-  name: '折光',
-  desc: '获得100点的碰撞伤害，碰撞后隐身1秒。',
+  name: '折光',  desc: '获得100点的碰撞伤害，碰撞后隐身1秒。',
   descDetail: `碰撞伤害由 0 改为 ${YUNCAI.zheguang.melee}。` +
         `每次成功造成近战伤害后进入隐身，持续 ${YUNCAI.zheguang.stealthSeconds} 秒。` +
         `隐身期间**不会受到敌方小球的近战伤害**，但弹道与场地物件（裁光的质点/细线）照常命中。` +
         `隐身期间画面上的小球会变成半透明并带一圈虚线轮廓。`,
   trigger: { type: 'passive' },
   passive(battle, unit) {
-    unit.melee = YUNCAI.zheguang.melee;
+    /* 走 meleeBonus 而不是直接写 unit.melee —— 陀螺会重算碰撞伤害，
+       直接写会被覆盖掉（碰撞伤害和速度一样是"基础 + 加成"模型）。 */
+    unit.meleeBonus = (unit.meleeBonus || 0) + TAOYAO_ZHEGUANG_MELEE;
+    battle.refreshMelee(unit);
   },
   hooks: {
     /* 只有近战命中才触发隐身（技能命中不算）——所以要检查 kind */
@@ -421,10 +427,15 @@ export const SKILL_KAIHUA = {
     const P = YUNCAI.kaihua;
     unit.bloomed = true;
     unit.hp = Math.min(unit.maxHp, unit.hp + P.heal);
-    unit.speed = Math.round(P.speed * SCALE);
-    unit.baseSpeed = unit.speed;
+    /* 提速必须走速度模型：光写 unit.speed 字段球根本不会变快
+       （实际移动看的是 vx/vy，那个是开局定好的）；
+       而且要用 speedOverride，否则陀螺一叠层重算就把这个覆盖丢了。 */
+    unit.speedOverride = P.speed;
+    battle.refreshSpeed(unit);
     unit.lightBonus = P.lightBonus;
-    unit.melee += P.meleeBonus;
+    /* 碰撞伤害 +50 同样走加成，不能直接加 u.melee */
+    unit.meleeBonus = (unit.meleeBonus || 0) + P.meleeBonus;
+    battle.refreshMelee(unit);
     /* 装了辉光领域的话，闪避也从 10% 提到 15% */
     if (unit.skills.includes('yuncai_domain')) unit.dodge = YUNCAI.domain.dodgeBloomed;
     battle._emit('bloom', unit, null, P.heal);
@@ -571,6 +582,311 @@ export const SKILL_XIGUANG = {
   }
 };
 
+/* ============================================================
+   桃夭 · 五个技能（作者设计，2026-10 版）
+   ------------------------------------------------------------
+   基础数值：HP 1750 / 速度 120 / 碰撞伤害 66。
+   ① 映霞[荣] 与 ② 映霞[枯] **互斥**：同一 group，只能选一个。
+   （每局仍是最多装配 3 个，所以桃夭实际是"荣或枯 + 另外两个"。）
+
+   几个只在桃夭身上出现的机制：
+     · **箭矢落空**：弹道撞墙或到寿命都没碰到球 = 落空，
+       用来驱动"认真拉矢"的掉层。
+     · **被攻击**：只有一次性打击（近战/弹道/爆炸）才算，
+       裁光那种每帧接触伤害不算 —— 否则叠层瞬间满，等于没设计。
+     · **旋转**：陀螺层数驱动，角度进快照，暂停回放时旋转也冻得住。
+   ============================================================ */
+export const TAOYAO = {
+  /* ① 映霞[荣]：连射 + 五连发 */
+  rong: {
+    cd: 1, damage: 50, speed: 500, r: 5, life: 1.6, color: '#f9a8d4',
+    knockback: 60,          // 轻微击退
+    burstEvery: 5,          // 射 5 次之后
+    burstCount: 5,          // 下一次连发 5 支
+    burstDmg: 30,
+    burstSpread: 0.42,      // 五连发的扇形张角（弧度，总张角的一半）
+  },
+
+  /* ② 映霞[枯]：黑白箭 + 减速 */
+  ku: {
+    cd: 2, damage: 65, speed: 450, r: 5, life: 2.0, color: '#6b7280',
+    slow: 20, slowSeconds: 2,
+  },
+
+  /* ③ 认真拉矢：命中叠层、落空掉层 */
+  aim: {
+    perStack: 5, maxStacks: 10, losePerMiss: 2,
+  },
+
+  /* ④ 春景：自我 buff */
+  chunjing: {
+    cd: 10, duration: 5, healPerSec: 20,
+    cannonEvery: 2.5, cannonDmg: 180, cannonSpeed: 420, cannonR: 7,
+    cannonLife: 3, color: '#fbcfe8',
+  },
+
+  /* ⑤ 陀螺：被打击叠层 */
+  top: {
+    maxStacks: 10,
+    healPerSec: 1, meleePer: 2, speedPer: 2,
+    /* 每层旋转速度见 core.js 的 SPIN_RATE_PER_STACK */
+  },
+};
+
+/* 单位身上有没有装「认真拉矢」。
+   为什么必须查一下：叠层是挂在**箭矢的命中回调**上的，
+   而箭矢不管装没装认真拉矢都会发射。不查的话，
+   没装这个技能的桃夭照样在偷偷叠层加伤害 —— 实测满层时箭矢打出了 80 而不是 50。 */
+function hasAim(unit) {
+  return !!(unit && unit.skills && unit.skills.includes(SKILL_AIM.id));
+}
+
+/* ------------------------------------------------------------
+   箭矢的公共部分：映霞两式都靠它发射
+   ------------------------------------------------------------ */
+function fireArrow(battle, unit, target, spec) {
+  const dx = target.x - unit.x, dy = target.y - unit.y;
+  const d = Math.hypot(dx, dy) || 1;
+  const spd = spec.speed * SCALE;
+  const stacks = hasAim(unit) ? (unit.flags.aimStacks || 0) : 0;
+  /* 认真拉矢：每层 +5，只作用于箭矢（春景的光炮不吃） */
+  const dmg = Math.max(1, Math.round(
+    (spec.damage + TAOYAO.aim.perStack * stacks) * (unit.damageMul ?? 1)));
+  battle._spawnProjectile({
+    kind: 'aura', tag: 'arrow', owner: unit,
+    x: unit.x, y: unit.y,
+    vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
+    damage: dmg,
+    radius: Math.round(spec.r * SCALE),
+    life: spec.life, color: spec.color,
+    knockback: spec.knockback || 0,
+    /* 命中 → 认真拉矢 +1 层（没装这个技能就不叠） */
+    onHit: (b, from) => {
+      if (!hasAim(from)) return;
+      from.flags.aimStacks = Math.min(TAOYAO.aim.maxStacks, (from.flags.aimStacks || 0) + 1);
+      b._emit('aimStack', from, null, from.flags.aimStacks);
+    },
+    /* 落空（撞墙或到寿命都没碰到球）→ -2 层 */
+    onMiss: (b, from) => {
+      if (!hasAim(from)) return;
+      const before = from.flags.aimStacks || 0;
+      if (before <= 0) return;
+      from.flags.aimStacks = Math.max(0, before - TAOYAO.aim.losePerMiss);
+      b._emit('aimMiss', from, null, from.flags.aimStacks);
+    },
+  });
+}
+
+/* ------------------------------------------------------------
+   ① 映霞[荣]：每 1 秒一支粉色箭矢；射满 5 次后下一次改为一轮五连发
+   ------------------------------------------------------------ */
+export const SKILL_RONG = {
+  id: 'taoyao_rong',
+  name: '映霞[荣]',
+  group: 'yingxia',
+  desc: '每1秒发射一支粉色的箭矢，箭矢移动速度为500，造成50伤害，有轻微的击退效果。' +
+        '射击五次后，下一次会连续发射5发箭矢，每支伤害降低到30。',
+  descDetail: `每 ${TAOYAO.rong.cd} 秒瞄准最近的敌人发射一支粉色箭矢` +
+        `（速度 ${TAOYAO.rong.speed}，伤害 ${TAOYAO.rong.damage}，带轻微击退 ${TAOYAO.rong.knockback}）。` +
+        `射出 ${TAOYAO.rong.burstEvery} 支之后，下一轮改为**一次齐射 ${TAOYAO.rong.burstCount} 支**` +
+        `（扇形散开，每支伤害降到 ${TAOYAO.rong.burstDmg}），随后重新计数。` +
+        `与「映霞[枯]」互斥，两个只能选一个。`,
+  trigger: { type: 'cooldown', cd: TAOYAO.rong.cd },
+  run(ctx) {
+    const { battle, unit, target } = ctx;
+    if (!target) return false;
+    const P = TAOYAO.rong;
+    const fired = (unit.flags.rongShots || 0) + 1;
+    if (fired > P.burstEvery) {
+      /* 五连发：朝目标扇形散开 */
+      unit.flags.rongShots = 0;
+      const base = Math.atan2(target.y - unit.y, target.x - unit.x);
+      const n = P.burstCount;
+      for (let i = 0; i < n; i++) {
+        const off = (n === 1) ? 0 : (i / (n - 1) * 2 - 1) * P.burstSpread;
+        const ang = base + off;
+        const dx = Math.cos(ang), dy = Math.sin(ang);
+        fireArrow(battle, unit, {
+          x: unit.x + dx * 1000, y: unit.y + dy * 1000,   // 借方向，用假目标
+        }, { ...P, damage: P.burstDmg, knockback: 0 });
+      }
+      battle._emit('arrowBurst', unit, target, n);
+    } else {
+      unit.flags.rongShots = fired;
+      fireArrow(battle, unit, target, P);
+    }
+    return true;
+  }
+};
+
+/* ------------------------------------------------------------
+   ② 映霞[枯]：每 2 秒一支黑白箭矢，命中后目标移速 -20 持续 2 秒
+   ------------------------------------------------------------ */
+export const SKILL_KU = {
+  id: 'taoyao_ku',
+  name: '映霞[枯]',
+  group: 'yingxia',
+  desc: '每2秒发射一支黑白色的箭矢，箭矢移动速度为450，造成65伤害，' +
+        '被命中后的小球移动速度减少20，持续2秒。',
+  descDetail: `每 ${TAOYAO.ku.cd} 秒瞄准最近的敌人发射一支黑白箭矢` +
+        `（速度 ${TAOYAO.ku.speed}，伤害 ${TAOYAO.ku.damage}）。` +
+        `命中后目标移动速度 −${TAOYAO.ku.slow}，持续 ${TAOYAO.ku.slowSeconds} 秒（可刷新）。` +
+        `减速走引擎的速度模型（基础速度 + 加成 − 减益），` +
+        `所以和陀螺的加速、开华的提速是叠加而不是互相覆盖。` +
+        `与「映霞[荣]」互斥，两个只能选一个。`,
+  trigger: { type: 'cooldown', cd: TAOYAO.ku.cd },
+  run(ctx) {
+    const { battle, unit, target } = ctx;
+    if (!target) return false;
+    const P = TAOYAO.ku;
+    const dx = target.x - unit.x, dy = target.y - unit.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const spd = P.speed * SCALE;
+    const stacks = hasAim(unit) ? (unit.flags.aimStacks || 0) : 0;
+    battle._spawnProjectile({
+      kind: 'aura', tag: 'arrow', owner: unit,
+      x: unit.x, y: unit.y,
+      vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
+      damage: Math.max(1, Math.round((P.damage + TAOYAO.aim.perStack * stacks) * (unit.damageMul ?? 1))),
+      radius: Math.round(P.r * SCALE),
+      life: P.life, color: P.color,
+      onHit: (b, from, to) => {
+        /* 认真拉矢：命中 +1 层（没装这个技能就不叠） */
+        if (hasAim(from)) {
+          from.flags.aimStacks = Math.min(TAOYAO.aim.maxStacks, (from.flags.aimStacks || 0) + 1);
+          b._emit('aimStack', from, null, from.flags.aimStacks);
+        }
+        /* 减速：走速度模型，带时限（到期由 core 的计时器撤掉） */
+        if (to && to.alive) {
+          to.speedSlow = -P.slow;
+          to.speedSlowFrames = Math.round(P.slowSeconds / DT);
+          b.refreshSpeed(to);
+          b._emit('slow', to, null, P.slow);
+        }
+      },
+      onMiss: (b, from) => {
+        if (!hasAim(from)) return;
+        const before = from.flags.aimStacks || 0;
+        if (before <= 0) return;
+        from.flags.aimStacks = Math.max(0, before - TAOYAO.aim.losePerMiss);
+        b._emit('aimMiss', from, null, from.flags.aimStacks);
+      },
+    });
+    return true;
+  }
+};
+
+/* ------------------------------------------------------------
+   ③ 认真拉矢：被动（叠层逻辑写在箭矢的 onHit / onMiss 里，这里只做说明）
+   ------------------------------------------------------------ */
+export const SKILL_AIM = {
+  id: 'taoyao_aim',
+  name: '认真拉矢',
+  desc: '被动技能，每次箭矢命中后，下一发箭矢伤害提高5点，最多叠加十层，' +
+        '箭矢落空之后会降低两层层数。',
+  descDetail: `被动。每支箭矢**命中**后层数 +1（下一发伤害 +${TAOYAO.aim.perStack}），` +
+        `最多 ${TAOYAO.aim.maxStacks} 层（即最多 +${TAOYAO.aim.maxStacks * TAOYAO.aim.perStack} 伤害）；` +
+        `箭矢**落空**（撞墙或到寿命都没碰到球）时层数 −${TAOYAO.aim.losePerMiss}，最低 0 层。` +
+        `只作用于映霞的箭矢 —— 春景的淡粉色光炮不吃这个加成，也不叠层。`,
+  trigger: { type: 'passive' },
+  passive(battle, unit) {
+    unit.flags.aimStacks = unit.flags.aimStacks || 0;
+  }
+};
+
+/* ------------------------------------------------------------
+   ④ 春景：每 10 秒给自己一个 5 秒 buff（每秒回血 + 每 2.5 秒补一发光炮）
+   ------------------------------------------------------------ */
+export const SKILL_CHUNJING = {
+  id: 'taoyao_chunjing',
+  name: '春景',
+  desc: '每隔10秒对自己施加一次持续5秒的"春景"buff，在buff下，' +
+        '桃夭每秒恢复20点生命值，每2.5秒额外发射一次淡粉色的光炮，光炮伤害为180。',
+  descDetail: `每 ${TAOYAO.chunjing.cd} 秒给自己施加一次「春景」，持续 ${TAOYAO.chunjing.duration} 秒。` +
+        `buff 期间：每秒回复 ${TAOYAO.chunjing.healPerSec} 点生命（回复量用余数累积，` +
+        `不会因为每帧不足 1 点而回不上血）；` +
+        `每 ${TAOYAO.chunjing.cannonEvery} 秒额外朝最近的敌人发射一发光炮` +
+        `（伤害 ${TAOYAO.chunjing.cannonDmg}，速度 ${TAOYAO.chunjing.cannonSpeed}）。` +
+        `光炮与映霞的箭矢是两套体系：不吃「认真拉矢」的层数加成，命中也**不叠层**。`,
+  trigger: { type: 'cooldown', cd: TAOYAO.chunjing.cd },
+  run(ctx) {
+    const { battle, unit } = ctx;
+    const P = TAOYAO.chunjing;
+    unit.flags.chunjingUntil = battle.frame + Math.round(P.duration / DT);
+    unit.flags.chunjingCannon = 0;          // 立即允许第一次补炮
+    battle._emit('buffOn', unit, null, P.duration, { buff: '春景' });
+    return true;
+  },
+  hooks: {
+    /* 每帧推进 buff：回血 + 补炮计时 */
+    onThink(battle, unit) {
+      const P = TAOYAO.chunjing;
+      if (!unit.flags.chunjingUntil || battle.frame >= unit.flags.chunjingUntil) {
+        if (unit.flags.chunjingUntil) {
+          unit.flags.chunjingUntil = 0;
+          battle._emit('buffOff', unit, null, 0, { buff: '春景' });
+        }
+        return;
+      }
+      battle._heal(unit, P.healPerSec * DT);
+      unit.flags.chunjingCannon = (unit.flags.chunjingCannon || 0) + DT;
+      if (unit.flags.chunjingCannon < P.cannonEvery) return;
+      unit.flags.chunjingCannon -= P.cannonEvery;
+      const target = battle._nearestEnemy(unit);
+      if (!target) return;
+      const dx = target.x - unit.x, dy = target.y - unit.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const spd = P.cannonSpeed * SCALE;
+      battle._spawnProjectile({
+        kind: 'aura', tag: 'chunjing_cannon', owner: unit,
+        x: unit.x, y: unit.y,
+        vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
+        damage: Math.max(1, Math.round(P.cannonDmg * (unit.damageMul ?? 1))),
+        radius: Math.round(P.cannonR * SCALE),
+        life: P.cannonLife, color: P.color,
+      });
+    }
+  }
+};
+
+/* ------------------------------------------------------------
+   ⑤ 陀螺：被"真正的打击"命中时叠层，层数同时驱动四件事
+   ------------------------------------------------------------ */
+export const SKILL_TOP = {
+  id: 'taoyao_top',
+  name: '陀螺',
+  desc: '被攻击时，桃夭的小球会开始旋转，转速会进行叠加，最多叠加10层。' +
+        '每层会使桃夭每秒回复1的生命值，且使桃夭碰撞伤害提升2点，移动速度提升2点。',
+  descDetail: `被攻击时叠一层，最多 ${TAOYAO.top.maxStacks} 层（被打得越多转得越快）。` +
+        `每层：每秒回复 ${TAOYAO.top.healPerSec} 点生命、碰撞伤害 +${TAOYAO.top.meleePer}、` +
+        `移动速度 +${TAOYAO.top.speedPer}。满层时 +${TAOYAO.top.meleePer * TAOYAO.top.maxStacks} 碰撞伤害、` +
+        `+${TAOYAO.top.speedPer * TAOYAO.top.maxStacks} 移速、每秒回 ${TAOYAO.top.healPerSec * TAOYAO.top.maxStacks} 血。` +
+        `注意"被攻击"只算**真正的打击**（近战、弹道、爆炸）——` +
+        `裁光质点/细线那种每帧接触伤害、以及场地灼烧都不算，` +
+        `否则一秒 60 次的接触伤害会瞬间把层数顶满。`,
+  trigger: { type: 'passive' },
+  passive(battle, unit) {
+    unit.spinStacks = unit.spinStacks || 0;
+  },
+  hooks: {
+    onDamaged(battle, unit, ctx) {
+      if (!ctx || !ctx.heavy) return;          // 每帧接触伤害不算"被攻击"
+      if (unit.spinStacks >= TAOYAO.top.maxStacks) return;
+      unit.spinStacks++;
+      /* 层数一变，碰撞伤害与移速都要跟着走 —— 两处都走"基础 + 加成"模型重算 */
+      unit.spinMeleeBonus = TAOYAO.top.meleePer * unit.spinStacks;
+      battle.refreshMelee(unit);
+      unit.speedBonus = TAOYAO.top.speedPer * unit.spinStacks;
+      battle.refreshSpeed(unit);
+      battle._emit('spinUp', unit, null, unit.spinStacks);
+    },
+    /* 每帧按层数回血 */
+    onThink(battle, unit) {
+      if (unit.spinStacks > 0) battle._heal(unit, TAOYAO.top.healPerSec * unit.spinStacks * DT);
+    }
+  }
+};
+
 /* ------------------------------------------------------------
    注册表：小球通过 skills: ['test_shot','test_dash'] 引用
    ------------------------------------------------------------ */
@@ -584,10 +900,60 @@ export const SKILLS = {
   [SKILL_PRISM.id]: SKILL_PRISM,
   [SKILL_DOMAIN.id]: SKILL_DOMAIN,
   [SKILL_XIGUANG.id]: SKILL_XIGUANG,
+  [SKILL_RONG.id]: SKILL_RONG,
+  [SKILL_KU.id]: SKILL_KU,
+  [SKILL_AIM.id]: SKILL_AIM,
+  [SKILL_CHUNJING.id]: SKILL_CHUNJING,
+  [SKILL_TOP.id]: SKILL_TOP,
 };
 
 export function getSkill(id) {
   return SKILLS[id] || null;
+}
+
+/**
+ * 互斥技能的整理：同一 group 里只保留第一个，后面的丢掉。
+ *
+ * 为什么放在 skills.js 而不是 balls.js：分组信息属于技能注册表，
+ * 而 balls.js 不能 import skills.js —— skills.js 顶部就要用 balls.js 的
+ * SCALE / DT 做常量计算，反过来引会形成循环依赖，
+ * ES 模块下会变成"访问未初始化的 DT"直接报错。
+ *
+ * 三个地方都要用它，缺一个就会出现"界面显示装了 2 个、引擎只认 1 个"：
+ *   · 引擎建单位时（core.js）—— 权威口径
+ *   · 准备界面存装配时（ui-prepare.js）
+ *   · 准备界面渲染勾选框时（把互斥项置灰并说明原因）
+ */
+export function resolveLoadout(ids) {
+  const out = [];
+  const usedGroups = new Set();
+  for (const id of ids || []) {
+    const sk = getSkill(id);
+    if (!sk) continue;
+    if (sk.group) {
+      if (usedGroups.has(sk.group)) continue;    // 同组已经选过一个了
+      usedGroups.add(sk.group);
+    }
+    out.push(id);
+  }
+  return out;
+}
+
+/** 某个技能是否与"已选的其它技能"互斥（准备界面用它置灰勾选框） */
+export function conflictsWithChosen(id, chosenIds) {
+  const sk = getSkill(id);
+  if (!sk || !sk.group) return false;
+  if ((chosenIds || []).includes(id)) return false;   // 自己已经选了，不算冲突
+  return (chosenIds || []).some(x => {
+    const o = getSkill(x);
+    return o && o.group === sk.group;
+  });
+}
+
+/** 取技能所属的互斥组名（没有分组返回 null） */
+export function skillGroup(id) {
+  const sk = getSkill(id);
+  return (sk && sk.group) || null;
 }
 
 /**
