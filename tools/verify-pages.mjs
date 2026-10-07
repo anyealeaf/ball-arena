@@ -42,6 +42,13 @@ const CHECKS = [
 
 console.log(`验证站点: ${BASE}\n`);
 let bad = 0;
+/* 线上可能落后于本地（发布是按需触发的），所以长度对不上本身不是错误，
+   但**必须显式报出来** —— 否则"拿到旧缓存"和"内容是对的"看起来一模一样。
+   这条是实测踩出来的：第一次回读十个资源全 200 就报了"通过"，
+   结果引擎 97 KB（实际 105 KB）、技能表 30 KB（实际 47 KB），
+   全是推送前的旧缓存。旧的 balls.js 配新的 index.html 页面能开、不报错，
+   只有进游戏才会发现少角色 —— 看响应码永远发现不了。 */
+const stale = [];
 
 for (const [path, wantType, label] of CHECKS) {
   const url = BASE + path + bust();
@@ -52,8 +59,17 @@ for (const [path, wantType, label] of CHECKS) {
     const typeOk = !wantType || ct.includes(wantType);
     const ok = r.status === 200 && buf.length > 0 && typeOk;
     if (!ok) bad++;
-    console.log(`  ${ok ? '✅' : '❌'} ${label.padEnd(10)} ${String(r.status).padStart(3)} ` +
-      `${String(buf.length).padStart(8)} bytes  ${ct.split(';')[0]}`);
+    /* 本地也有这个文件就比一下长度（逐字节比对内容，长度不同必然不同） */
+    let localLen = null;
+    try {
+      localLen = (await fs.stat(new URL('../' + path, import.meta.url))).size;
+    } catch { /* 本地没有这个文件（比如只存在线上的），跳过比对 */ }
+    const same = localLen === null || localLen === buf.length;
+    if (!same) stale.push({ label, path, served: buf.length, local: localLen });
+    const mark = same ? '✅' : '⚠️ ';
+    console.log(`  ${ok ? mark : '❌'} ${label.padEnd(10)} ${String(r.status).padStart(3)} ` +
+      `${String(buf.length).padStart(8)} bytes  ${ct.split(';')[0]}` +
+      (same ? '' : `  ← 本地 ${localLen} bytes（线上是旧版本）`));
   } catch (e) {
     bad++;
     console.log(`  ❌ ${label.padEnd(10)} 请求失败: ${e.message}`);
@@ -98,6 +114,18 @@ try {
 } catch (e) {
   bad++;
   console.log(`  ❌ 新鲜度抽查失败: ${e.message}`);
+}
+
+/* 收尾：把"线上落后于本地"的资源汇总报出来。
+   这不是错误（发布是按需触发的），但**绝不能不吭声** ——
+   否则下一次"发布完了吗"就得靠人肉翻代码。 */
+if (stale.length) {
+  console.log('');
+  console.log(`  ⚠️  ${stale.length} 个资源线上仍是旧版本（发布按需触发，属正常）：`);
+  for (const s of stale) {
+    console.log(`     ${s.label}（${s.path}）：线上 ${s.served} / 本地 ${s.local} bytes`);
+  }
+  console.log('     刚推完就出现这一栏 → CDN 还没刷完，等 1~2 分钟再跑一次。');
 }
 
 console.log('');
