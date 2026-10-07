@@ -19,9 +19,14 @@ if (!USER || !REPO) {
 const BASE = `https://${USER}.github.io/${REPO}/`;
 const bust = () => `?v=${Date.now()}`;
 
-/* 要抽查的资源：入口、引擎、音效、技能表、样式，以及两张贴图。
+/* 新鲜度抽查要读本地的 js/balls.js 来现取球种清单（见文件末尾） */
+import fs from 'node:fs/promises';
+
+/* 要抽查的资源：入口、引擎、音效、技能表、样式，以及每个角色的贴图。
    贴图必须验 —— 它最容易因为路径大小写或漏传而 404，
-   而 404 页面也是 200 之外最常见的坑（这里靠 content-type 判定）。 */
+   而 404 页面也是 200 之外最常见的坑（这里靠 content-type 判定）。
+   **每加一个角色就要在这里加一行**：漏加不会报错，
+   只会让"新角色线上没有贴图"这件事一直没人发现。 */
 const CHECKS = [
   ['index.html', 'text/html', 'HTML 入口'],
   ['js/main.js', 'javascript', '入口脚本'],
@@ -31,6 +36,7 @@ const CHECKS = [
   ['css/styles.css', 'css', '样式'],
   ['assets/characters/yuncai_ball.png', 'image/', '晕彩贴图'],
   ['assets/characters/yuncai_ball_bloom.png', 'image/', '开华贴图'],
+  ['assets/characters/taoyao_ball.png', 'image/', '桃夭贴图'],
   ['README.md', '', '说明文档'],
 ];
 
@@ -68,6 +74,30 @@ try {
 } catch (e) {
   bad++;
   console.log(`  ❌ 读取 index.html 失败: ${e.message}`);
+}
+
+/* 新鲜度抽查：线上的 js/balls.js 必须**包含本地每一个球种 id**。
+   为什么要这么测：Pages 全站 max-age=600，刚发完常常拿到的是旧缓存，
+   而"旧的 balls.js + 新的 index.html"这种半新半旧的组合看起来完全正常，
+   只有进游戏才会发现少了角色 —— 靠肉眼看响应码是看不出来的。
+   判据从本地文件现取，所以**加了新角色不用改这里**。 */
+try {
+  const localSpec = await fs.readFile(new URL('../js/balls.js', import.meta.url), 'utf8');
+  /* 球种条目的写法是 `id: 'xxx',` —— 从本地文件里把它们抽出来 */
+  const ids = [...localSpec.matchAll(/^\s{4}id:\s*'([a-z0-9_]+)'/gim)].map(m => m[1]);
+  const served = await (await fetch(BASE + 'js/balls.js' + bust())).text();
+  const missing = ids.filter(id => !served.includes(`'${id}'`));
+  const ok = ids.length > 0 && missing.length === 0;
+  console.log('');
+  console.log(`  ${ok ? '✅' : '❌'} 线上球种与本地一致 ` +
+    `（本地 ${ids.length} 个：${ids.join('、')}）`);
+  if (!ok) {
+    console.log(`     线上缺少: ${missing.join('、') || '（本地没抽到球种 id，正则可能失效了）'}`);
+    bad++;
+  }
+} catch (e) {
+  bad++;
+  console.log(`  ❌ 新鲜度抽查失败: ${e.message}`);
 }
 
 console.log('');
