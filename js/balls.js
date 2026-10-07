@@ -64,6 +64,29 @@ export const SPECIES = [
       src: 'assets/characters/yuncai_ball.png',
       cx: 0.5, cy: 0.5, r: 0.5
     },
+    /* ---------- 辉光领域的背景层（作者提供的横向长图）----------
+       这张图**直接就是成品**，不需要任何切图/规整步骤，所以它放在
+       assets/characters/ 而不是 assets/src/（后者是"待处理的源图"）。
+
+       领域展开分两段，参数都在这里，改数值不用动渲染代码：
+         1) 从晕彩身上扩散一圈气浪到铺满全场，气浪扫过的地方领域浮现出来；
+         2) 展开完成后，背景缓慢向右滚动（镜像平铺，不会出现接缝跳变），
+            整体透明度降到 opacity —— 压到 30~50% 是为了不盖住对战。
+
+       坐标约定：图片按**场地高度**等比缩放，于是横向一定溢出（图是 7:3），
+       溢出量正好拿来滚动。竖直方向刚好铺满，不拉伸。 */
+    domain: {
+      src: 'assets/characters/yuncai_aurora.jpg',
+      revealSeconds: 1.3,     // 气浪从中心铺满全场的时间
+      opacity: 0.42,          // 展开完成后稳定下来的不透明度（作者要 30%~50%）
+      fadeInPortion: 0.25,    // 前 25% 的展开过程里淡入，避免"啪"地冒出来
+      scrollUnitsPerSec: 7,   // 展开后背景向右滚动的速度（世界单位/秒）
+      ringWidth: 30,          // 气浪环的宽度（世界单位）
+      ringAlpha: 0.85,
+      ringCoreAlpha: 0.95,
+      glow: '#7dd3fc',
+      core: '#ffffff'
+    },
     /* 开华形态的贴图：开华发动后渲染层自动换成这一张 */
     stickerBloom: {
       src: 'assets/characters/yuncai_ball_bloom.png',
@@ -99,6 +122,58 @@ export const SPECIES = [
       src: 'assets/characters/taoyao_ball.png',
       cx: 0.5, cy: 0.5, r: 0.5
     },
+    /* ---------- 手持物件：弓（动作动画的载体）----------
+       与球体贴图**完全分开**的一条绘制路径，原因有三个：
+         1. 球体贴图会被 clip 成圆形，弓画在球外面会被整个裁掉；
+         2. 球装陀螺时会自转（spin），弓跟着转就没法瞄准了 ——
+            分开画之后弓天然不继承自转，这个问题自动消失；
+         3. 弓要朝目标转，而球体贴图只需要自转，两者的变换互不相干。
+
+       三个动作状态，与作者的描述一一对应（映霞[荣]-1 / -2）：
+         idle —— 平时（弓举着，弦是直的）        castP 恰好 = 0
+         draw —— 准备射箭（弦拉开，搭好一支箭）  0 < castP < 1
+         shot —— 射箭那一帧（弓回到平时，箭已离弦）castP = 1
+       `shot` 留 null = 与 idle 同一张图，也就是作者说的"射箭的时候切换为 1"。
+
+       两张弓图的原始画布宽度不同（116 / 196，拉弓那张多一支箭），
+       直接各自居中画会让弓横跳 40px。所以由 tools/make-bow-sprites.mjs
+       先把两帧按"弓臂对齐"贴到**同一块画布**上，这里拿到的两张图同尺寸同锚点。 */
+    bow: {
+      idle: 'assets/characters/taoyao_bow_idle.png',
+      draw: 'assets/characters/taoyao_bow_draw.png',
+      shot: null,                                        // null = 同 idle
+      arrow: 'assets/characters/taoyao_arrow.png',
+
+      /* anchor —— **球心**落在这块画布上的位置（画布宽高的比例）。
+         弓绕这个点旋转，所以它同时决定了"球握在弓的哪个位置"。
+         y 取 0.521 = 画里那支搭好的箭所在的高度，也就是搭箭点 ——
+         球心必须在这一行上，否则箭会从球的旁边而不是身上射出去。 */
+      anchor: { x: 0.4260, y: 0.5211 },
+      /* bowH —— 弓的绘制高度（世界单位），宽度按原图比例。球直径是 32。
+         弓是 1:4.96 的细长弓，所以这个数要比球直径大不少才看得清；
+         取 140 时弓的内容宽度约 28 单位，和球差不多宽 ——
+         表现为"球在弓的正中、上下各伸出一截弓臂"。 */
+      bowH: 140,
+
+      /* nock —— 搭箭节点（那支搭好的箭的箭尾）在画布上的位置。
+         五连发时，额外四根箭以这个点为轴扇形排开 —— 五根箭共用同一个箭尾。 */
+      nock: { x: 0.0204, y: 0.5211 },
+      /* 箭矢长度按弓高的比例给（画里那支搭好的箭是弓高的 0.335 倍），
+         这样改 bowH 时箭会跟着等比缩放，不用再调一次。 */
+      arrowLenFrac: 0.335,
+
+      /* 五连发：在 draw 的基础上，于同一个搭箭节点扇形排布箭矢。
+         这些箭是**武器的一部分**，所以跟着弓一起旋转（用弓的局部坐标系）。
+
+         **角度必须和箭真正飞出去的角度一致** —— 画这个扇形的意义就是
+         "预告这五发往哪飞"。所以这里给的是"总共几发 + 张角的一半"，
+         渲染层按和技能**同一个公式**算角度，再把正中那根跳掉
+         （0° 那根已经画在 draw 图里了）。
+         参数对应 TAOYAO.rong 的 burstCount / burstSpread：
+           5 发 / 0.42 弧度（24.06°）→ 0°, ±12.03°, ±24.06°。
+         诊断里有一条断言把这两个数钉在一起，改一边不改另一边会变红。 */
+      burst: { count: 5, spreadDeg: 24.06 }
+    },
     resource: null,
     /* 数组顺序 = "默认装配"的优先级（前 3 个）。
        刻意把「映霞[枯]」排在第 4 位：它和「映霞[荣]」互斥，
@@ -110,6 +185,49 @@ export const SPECIES = [
       'taoyao_chunjing',   // ④ 春景
       'taoyao_ku',         // ② 映霞[枯]（与①互斥）
       'taoyao_top'         // ⑤ 陀螺
+    ]
+  },
+
+  {
+    id: 'tina',
+    name: '缇娜',
+    color: '#c0253f',          // 取自立绘的红裙与红宝石（技能那套"猩红色"同源）
+    hp: 1500,
+    r: 16,
+    speed: 125,
+    melee: 50,
+    reach: 0,
+    desc: '魔法少女。血量 1500、速度 125、碰撞伤害 50。' +
+          '打法围绕"贴身吸血 + 蝙蝠攒魔力"，技能共 7 个，每局最多装配 3 个。',
+    tags: ['魔法少女', '正式角色'],
+    sticker: {
+      src: 'assets/characters/tina_ball.png',
+      cx: 0.5, cy: 0.5, r: 0.5
+    },
+    /* 魔力计数：由「蝙蝠」返回时逐点积攒（不是随时间自动涨），
+       满 5 点触发一次"偷学"——见 js/skills.js 的 tina_bat。
+       所以 gainPerSec / gainOnHit 都是 0，涨的方式写在技能里。 */
+    resource: {
+      id: 'mana',
+      name: '魔力',
+      max: 5,
+      init: 0,
+      gainPerSec: 0,
+      gainOnHit: 0,
+      color: '#c0253f'
+    },
+    /* 数组顺序 = 默认装配优先级（前 3 个），与作者给的编号 ①~⑦ 一致。
+       默认是「吸血习性 + 蝙蝠 + 魔力霰弹」——前 3 个都不互斥，三个都能用。
+       ⑤⑥⑦ 三个「公主传承」互斥（group: 'princess'），排在第 5~7 位，
+       所以它们不会被自动塞进默认装配。 */
+    skills: [
+      'tina_suck',         // ① 吸血习性
+      'tina_bat',          // ② 蝙蝠
+      'tina_shot',         // ③ 魔力霰弹
+      'tina_scepter',      // ④ 权杖（被动）
+      'tina_p1',           // ⑤ 公主传承1（与⑥⑦互斥）
+      'tina_p2',           // ⑥ 公主传承2（与⑤⑦互斥）
+      'tina_p3'            // ⑦ 公主传承3（与⑤⑥互斥）
     ]
   },
 
@@ -280,6 +398,11 @@ export function makeUnitStats(speciesId, skillIds) {
     /* 形态切换用的第二张贴图（例如晕彩的"开华"形态）。
        渲染层按快照里的 bloomed 标记决定用哪一张。 */
     stickerBloom: s.stickerBloom || null,
+    /* 手持物件（弓）。渲染层按快照里的 castP（施法进度）挑帧、
+       按 aimAngle（瞄准角）决定朝向。 */
+    bow: s.bow || null,
+    /* 领域背景层的配置（目前只有晕彩有）。渲染层要靠它拿图片路径与时长。 */
+    domain: s.domain ? { ...s.domain } : null,
     skills: normalizeSkills(s.id, skillIds),
     resource: s.resource ? { ...s.resource, value: s.resource.init || 0 } : null
   };

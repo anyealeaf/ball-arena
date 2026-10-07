@@ -23,8 +23,12 @@ export function renderBattle(root, cfg, onExit) {
   const seed = nextSeed();
   const battle = new Battle({ ...cfg, seed });
 
-  /* 提前加载本局用到的角色贴图：否则第一帧会是纯色兜底圆，随后才"变脸"。 */
-  preloadStickers(battle.units.map(u => ({ sticker: u.sticker })));
+  /* 提前加载本局用到的角色贴图：否则第一帧会是纯色兜底圆，随后才"变脸"。
+     开华形态的贴图与手持物件（弓）也要带上 —— 之前这里只传了 sticker，
+     于是晕彩开华那一瞬间会闪一下纯色圆，现在一并修掉。 */
+  preloadStickers(battle.units.map(u => ({
+    sticker: u.sticker, stickerBloom: u.stickerBloom, bow: u.bow, domain: u.domain
+  })));
 
   /* ---------- 2) 预算整局 ----------
      玩家操控时无法"预先知道"操作，因此按固定节奏采样键盘意图后
@@ -316,8 +320,10 @@ export function renderBattle(root, cfg, onExit) {
       `resize 次数     ${r._resizeCount || 0}`,
       `相机缩放        ${(r.camScale || 0).toFixed(3)}（渲染实际用 ${(r._usedScale || 0).toFixed(3)}）`,
       `世界窗口        ${px(r.boxW)} × ${px(r.boxH)}`,
-      `场地应占        ${px((r.camScale || 0) * (r.boxW || 0) / r.dpr)} × ` +
-        `${px((r.camScale || 0) * (r.boxH || 0) / r.dpr)} CSS 像素`,
+      /* camScale 是"缓冲区像素 / 世界单位"，换成 CSS 像素要除 _bufScale
+         （不是 dpr —— 缓冲区超过 MAX_BUF_W 时 bufScale 会被压低）。 */
+      `场地应占        ${px((r.camScale || 0) * (r.boxW || 0) / (r._bufScale || r.dpr || 1))} × ` +
+        `${px((r.camScale || 0) * (r.boxH || 0) / (r._bufScale || r.dpr || 1))} CSS 像素`,
       `场地            ${arena.name} ${Math.round((battle.sizeScale ?? 1) * 100)}%`,
       `在场小球        ${battle.units.filter(u => u.alive).length} / ${battle.units.length}`,
       `播放头          ${ui.frame} / ${totalFrames}`

@@ -23,7 +23,8 @@ const positional = args.filter(a => !a.startsWith('--'));
 const USER = positional[0];
 const REPO = positional[1];
 if (!USER || !REPO) {
-  console.error('用法: node tools/publish-via-api.mjs <user> <repo> [--dir <dir>] [--message "..."] [--create]');
+  console.error('用法: node tools/publish-via-api.mjs <user> <repo> [--dir <dir>] [--message "..."] [--create] [--check]');
+  console.error('  --check  只跑防泄漏闸门并列出待传文件，**不联网、不上传**');
   process.exit(1);
 }
 const opt = (name, fb) => {
@@ -36,9 +37,13 @@ const DIR = path.resolve(ROOT, opt('dir', '.'));
 const BRANCH = opt('branch', 'main');
 const MESSAGE = opt('message', '更新小球角斗场');
 const CREATE = has('create');
+const CHECK_ONLY = has('check');
 
-const TOKEN = process.env.GIT_PUSH_TOKEN || process.env.GH_TOKEN;
-if (!TOKEN) {
+/* --check 模式**不需要 token**：它不联网，只做本地检查。
+   发布改成"作者按需触发"之后，需要一个"现在这份代码能不能发"的自检入口 ——
+   否则每次想知道都得真的推一次。 */
+const TOKEN = CHECK_ONLY ? '' : (process.env.GIT_PUSH_TOKEN || process.env.GH_TOKEN);
+if (!TOKEN && !CHECK_ONLY) {
   console.error('✘ 需要 token：设置环境变量 GIT_PUSH_TOKEN（不要写成命令行参数，会进进程列表）');
   process.exit(1);
 }
@@ -154,6 +159,12 @@ function leakGateSelfTest() {
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.npm-cache', '.chrome', '.edge-cache', '.tmp']);
 const SKIP_FILES = new Set(['.DS_Store', 'Thumbs.db']);
 const TEXT_EXT = new Set(['.html', '.css', '.js', '.mjs', '.json', '.txt', '.md', '.svg', '.ps1', '.yml', '.yaml']);
+/* 生成出来的**预览图**不进仓库：
+   它们是跑工具时随手产出的中间产物（改个参数就变），
+   既不是站点资源、也不是美术原图，传上去只会每次发布都白白多几百 KB。
+   保留规则只认"文件名以 preview- 开头且是 png" —— 万一以后真有一张
+   叫别名的正式图，不会被误伤。 */
+const isGeneratedPreview = (rel) => /(^|\/)preview-[^/]*\.png$/i.test(rel);
 const files = [];
 function walk(dir, base) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -162,7 +173,7 @@ function walk(dir, base) {
     const full = path.join(dir, e.name);
     const rel = base ? base + '/' + e.name : e.name;
     if (e.isDirectory()) walk(full, rel);
-    else files.push({ rel, full, text: TEXT_EXT.has(path.extname(e.name).toLowerCase()) });
+    else if (!isGeneratedPreview(rel)) files.push({ rel, full, text: TEXT_EXT.has(path.extname(e.name).toLowerCase()) });
   }
 }
 
@@ -201,6 +212,18 @@ if (leaks.length) {
 }
 console.log('  ✓ 自测通过，未发现绝对路径 / 密钥字样');
 console.log('');
+
+if (CHECK_ONLY) {
+  /* 只检查不上传。列一下最大的几个文件，让人能一眼看出"新加的东西确实在里面"。 */
+  const withSize = files.map(f => ({ rel: f.rel, size: fs.statSync(f.full).size }));
+  console.log(`✓ 可以发布（--check，未联网、未上传）`);
+  console.log(`  待传文件 ${withSize.length} 个，共 ${(totalBytes / 1048576).toFixed(2)} MB`);
+  for (const f of withSize.sort((a, b) => b.size - a.size).slice(0, 5)) {
+    console.log(`    ${(f.size / 1024).toFixed(0).padStart(7)} KB  ${f.rel}`);
+  }
+  console.log(`  （只列最大的 5 个；正式发布把 --check 去掉即可）`);
+  process.exit(0);
+}
 
 /* ---------------------------------------------------------------------------
    0) 仓库不存在就建（--create）
@@ -261,7 +284,16 @@ const shaByPath = new Map();
 let done = 0, uploadedBytes = 0;
 for (const f of files) {
   const buf = fs.readFileSync(f.full);
-  const blob = await api('POST', `${API}/git/blobs`, { content: buf.toString('base64'), encoding: 'base64' });
+  let blob;
+  try {
+    blob = await api('POST', `${API}/git/blobs`, { content: buf.toString('base64'), encoding: 'base64' });
+  } catch (err) {
+    process.stdout.write('\n');
+    console.error(`✘ 上传失败：${f.rel}（${(buf.length / 1024).toFixed(0)} KB）`);
+    console.error(`   ${err.message}`);
+    console.error('   已经成功上传的部分不会产生提交，重跑一次即可（blob 是内容寻址的，重传不会重复计费）。');
+    throw err;
+  }
   shaByPath.set(f.rel, blob.sha);
   done++; uploadedBytes += buf.length;
   if (done % 10 === 0 || done === files.length) {

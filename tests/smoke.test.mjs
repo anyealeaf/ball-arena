@@ -450,6 +450,80 @@ console.log('\n【3b】技能装配');
   }
 }
 
+/* ---------- 4b. 回归：老存档里被固化的"空装配" ----------
+   真实事故：缇娜刚注册时技能表是空的（为了让球先进场试手感），
+   defaultSkillsFor('tina') 当时返回空数组，而准备界面会把默认**固化**进存档。
+   之后补上 7 个技能，存档里那个空数组依然生效 —— 玩家看到的就是
+   "缇娜的技能全都没有特效"（其实是压根没发动）。
+   这里注入一份那样的存档，验证迁移会把它还原成"跟随默认"。 */
+{
+  const slot = (sp) => ({ species: [[sp]], loadouts: [[[]]], teamSizes: [1, 1, 1, 1, 1, 1] });
+  /* ① 有迁移标记缺失的老存档：空装配应被还原成默认 */
+  localStorage.setItem('ballBattle.prepare.v1', JSON.stringify({
+    teamCount: 2,
+    teamSizes: [1, 1, 1, 1, 1, 1],
+    species: [['tina'], ['test']],
+    loadouts: [[[]], [[]]],          // ← 被固化的空装配
+    arenaId: 'rect', sizeScale: 0.5,
+    rules: { ...mods.balls.DEFAULT_RULES }, playerUnit: 0
+  }));
+  let cfg2 = null;
+  try { mods['ui-prepare'].renderPrepare(root, c => { cfg2 = c; }); } catch (e) { /* 渲染失败不影响下面 */ }
+  const migrated = JSON.parse(localStorage.getItem('ballBattle.prepare.v1'));
+  check('老存档里的空装配被迁移成"跟随默认"',
+    migrated && Array.isArray(migrated.loadouts) && migrated.loadouts[0][0] === null,
+    JSON.stringify(migrated && migrated.loadouts && migrated.loadouts[0]));
+  check('迁移记了标记（不会每次加载都重复抹掉用户的选择）',
+    migrated && migrated.migrations && migrated.migrations.loadoutDefaults >= 2,
+    JSON.stringify(migrated && migrated.migrations));
+
+  /* ② 迁移之后：缇娜**真的会带默认的三个技能**（不是空） */
+  const defTina = mods.balls.defaultSkillsFor('tina');
+  check('缇娜的默认装配现在非空（事故的前提是它当时为空）',
+    defTina.length === 3, defTina.join('、'));
+  localStorage.setItem('ballBattle.prepare.v1', JSON.stringify({
+    teamCount: 2,
+    teamSizes: [1, 1, 1, 1, 1, 1],
+    species: [['tina'], ['test']],
+    loadouts: [[null], [null]],      // 迁移后的正常状态
+    migrations: { loadoutDefaults: 2 },
+    arenaId: 'rect', sizeScale: 0.5,
+    rules: { ...mods.balls.DEFAULT_RULES }, playerUnit: 0
+  }));
+  let started = null;
+  try {
+    mods['ui-prepare'].renderPrepare(root, c => { started = c; });
+    const btn = root.querySelector('#startBtn');
+    if (btn && btn.onclick) btn.onclick();
+  } catch (e) { /* 同上 */ }
+  const units = started && started.teams && started.teams[0] && started.teams[0].units;
+  const tinaStats = units && units.find(u => u.stats && u.stats.speciesId === 'tina');
+  check('null 装配在开战时解析成默认的三个技能',
+    !!tinaStats && Array.isArray(tinaStats.stats.skills) && tinaStats.stats.skills.length === 3,
+    tinaStats ? String(tinaStats.stats.skills) : '没找到缇娜的战斗配置');
+  /* ③ 用户**主动**清空仍然要生效（不能因为迁移把选择抹掉） */
+  localStorage.setItem('ballBattle.prepare.v1', JSON.stringify({
+    teamCount: 2,
+    teamSizes: [1, 1, 1, 1, 1, 1],
+    species: [['tina'], ['test']],
+    loadouts: [[[]], [[]]],
+    migrations: { loadoutDefaults: 2 },   // 已经迁移过了
+    arenaId: 'rect', sizeScale: 0.5,
+    rules: { ...mods.balls.DEFAULT_RULES }, playerUnit: 0
+  }));
+  let started2 = null;
+  try {
+    mods['ui-prepare'].renderPrepare(root, c => { started2 = c; });
+    const btn = root.querySelector('#startBtn');
+    if (btn && btn.onclick) btn.onclick();
+  } catch (e) { /* 同上 */ }
+  const u2 = started2 && started2.teams && started2.teams[0] && started2.teams[0].units;
+  const t2 = u2 && u2.find(u => u.stats && u.stats.speciesId === 'tina');
+  check('迁移之后用户主动清空的装配仍然生效（不会被反复还原）',
+    !!t2 && Array.isArray(t2.stats.skills) && t2.stats.skills.length === 0,
+    t2 ? String(t2.stats.skills) : '没找到缇娜的战斗配置');
+}
+
 /* ---------- 5. 战斗界面 ---------- */
 console.log('\n【4】战斗界面');
 try {
@@ -573,13 +647,23 @@ console.log('\n【6】画布几何一致性');
      同一个世界尺寸会占更多像素 —— 这正是"半场看起来更大"的原因。 */
   const rect = mods.arenas.ARENA_BY_ID['rect'];
   {
-    const full = make(rect, 1.0, 880).r;
-    const half = make(mods.arenas.scaleArena(rect, 0.5), 0.5, 880).r;
-    // 相机应当把包围盒精确映射到画布宽度上
-    const fullFit = Math.abs(full.camScale * full.boxW - full.cssW) < 2;
-    const halfFit = Math.abs(half.camScale * half.boxW - half.cssW) < 2;
-    check('相机把场地精确铺满画布宽度', fullFit && halfFit,
-      `全场 ${(full.camScale * full.boxW).toFixed(0)}/${full.cssW}px，半场 ${(half.camScale * half.boxW).toFixed(0)}/${half.cssW}px`);
+    /* make() 返回 { r, cv }：断言要同时看渲染器状态和缓冲区尺寸 */
+    const { r: full, cv: fullCv } = make(rect, 1.0, 880);
+    const { r: half, cv: halfCv } = make(mods.arenas.scaleArena(rect, 0.5), 0.5, 880);
+    /* 判据必须落在**绘图缓冲区**上，不是 CSS 宽度。
+       踩过：这里原来比的是 camScale × boxW ≈ cssW —— 按构造必然成立，
+       于是 dpr=2 时"场地只铺满画布一半"这个 bug 一路绿灯放行，
+       直到作者在 135% 缩放的机器上肉眼发现"战场铺不满画布"。
+       draw() 在缓冲区坐标系上做 ctx.scale()，所以唯一有意义的断言是
+       "场地包围盒正好铺满 cv.width × cv.height"。 */
+    const fullFit = Math.abs(full.camScale * full.boxW - fullCv.width) < 2;
+    const halfFit = Math.abs(half.camScale * half.boxW - halfCv.width) < 2;
+    check('相机把场地精确铺满画布缓冲区（不是 CSS 宽度）', fullFit && halfFit,
+      `全场 ${(full.camScale * full.boxW).toFixed(0)}/${fullCv.width}px 缓冲区，半场 ${(half.camScale * half.boxW).toFixed(0)}/${halfCv.width}px`);
+    const fullH = Math.abs(full.camScale * full.boxH - fullCv.height) < 2;
+    const halfH = Math.abs(half.camScale * half.boxH - halfCv.height) < 2;
+    check('纵向同样铺满缓冲区（右边和下边都不留空白）', fullH && halfH,
+      `全场 ${(full.camScale * full.boxH).toFixed(0)}/${fullCv.height}px，半场 ${(half.camScale * half.boxH).toFixed(0)}/${halfCv.height}px`);
     // 半场的世界尺寸只有一半，因此同样画布宽度下 scale 更大 => 球看起来更大
     check('半场时相机更贴近（同样屏幕宽度下世界更小）', half.camScale > full.camScale * 1.5,
       `scale ${full.camScale.toFixed(3)} -> ${half.camScale.toFixed(3)}`);
@@ -660,6 +744,68 @@ console.log('\n【7】数据层');
     ty.skills.length === 5 && mods.balls.defaultSkillsFor('taoyao').length === 3,
     `${ty.skills.length} 个技能 → 默认 ${mods.balls.defaultSkillsFor('taoyao').join('、')}`);
   check('桃夭有贴图', !!ty.sticker && !!ty.sticker.src, ty.sticker && ty.sticker.src);
+  /* ---------- 手持物件（弓）：动作动画的载体 ----------
+     这几条守的是"弓一定看得见"这个最低要求 ——
+     弓画在球外面，只要弓太小，它就会被球整个盖住，
+     而这种事在别处不会报错、只有进游戏才发现"弓没了"。 */
+  check('桃夭挂了弓的配置（平时 / 拉弓 两张图 + 锚点 + 尺寸）',
+    !!ty.bow && !!ty.bow.idle && !!ty.bow.draw && !!ty.bow.anchor,
+    ty.bow ? `idle=${ty.bow.idle} draw=${ty.bow.draw}` : '无');
+  check('弓比球高（否则弓臂伸不出球外，等于没有）',
+    ty.bow && ty.bow.bowH > ty.r * 2,
+    ty.bow ? `bowH ${ty.bow.bowH} > 球直径 ${ty.r * 2}` : '无');
+  check('弓的锚点 / 尺寸 / 搭箭点 / 箭长都是 0~1 的有限数',
+    ty.bow && [ty.bow.anchor.x, ty.bow.anchor.y, ty.bow.nock.x, ty.bow.nock.y]
+      .every(v => Number.isFinite(v) && v >= 0 && v <= 1) &&
+    Number.isFinite(ty.bow.bowH) && ty.bow.bowH > 0 &&
+    Number.isFinite(ty.bow.arrowLenFrac) && ty.bow.arrowLenFrac > 0,
+    ty.bow ? `anchor(${ty.bow.anchor.x}, ${ty.bow.anchor.y}) bowH ${ty.bow.bowH} 箭长 ${ty.bow.arrowLenFrac}` : '无');
+  /* 锚点的 y 必须落在搭箭点的高度上 —— 否则箭会从球的旁边射出去，
+     而不是从球身上射出去。这是"球 = 射手"的几何前提。 */
+  check('球心（anchor.y）与搭箭点（nock.y）同高',
+    ty.bow && Math.abs(ty.bow.anchor.y - ty.bow.nock.y) < 0.01,
+    ty.bow ? `anchor.y ${ty.bow.anchor.y} vs nock.y ${ty.bow.nock.y}` : '无');
+  check('射箭那一帧的状态有定义（shot 留空 = 回退成平时）',
+    ty.bow && (ty.bow.shot === null || typeof ty.bow.shot === 'string'),
+    ty.bow ? `shot=${ty.bow.shot === null ? 'null（用 idle）' : ty.bow.shot}` : '无');
+  check('makeUnitStats 把弓带进了单位属性', !!mods.balls.makeUnitStats('taoyao').bow);
+  check('没配弓的球种不受影响', !mods.balls.makeUnitStats('test').bow);
+  /* "拉弓"是射出**之前**的动作，所以引擎必须提前告诉渲染层。
+     没装带 windup 的技能时这两个字段恒为 0 —— 见 tests/diag/bow.mjs。 */
+  const aiming = ['taoyao_rong', 'taoyao_ku'].every(id => {
+    const k = mods.skills.getSkill(id);
+    return k && k.aims === true && k.windup > 0;
+  });
+  check('映霞两式都声明了 aims + windup（引擎据此算瞄准角与拉弓进度）', aiming,
+    '荣 / 枯');
+  check('SNAP_STRIDE 与文档一致（castP / aimAngle / castKind 各占一位）',
+    mods.core.SNAP_STRIDE === 16, String(mods.core.SNAP_STRIDE));
+
+  /* ---------- 缇娜（球种 3） ---------- */
+  const tn = SPECIES_BY_ID.tina;
+  check('缇娜：1500 血 / 速度 125 / 碰撞 50',
+    tn.hp === 1500 && tn.speed === 125 && tn.melee === 50,
+    `HP ${tn.hp} / 速度 ${tn.speed} / 碰撞 ${tn.melee}`);
+  check('缇娜有 7 个技能，默认装配取 3 个',
+    tn.skills.length === 7 && mods.balls.defaultSkillsFor('tina').length === 3,
+    `${tn.skills.length} 个 → 默认 ${mods.balls.defaultSkillsFor('tina').join('、')}`);
+  check('缇娜有球体贴图', !!tn.sticker && !!tn.sticker.src, tn.sticker && tn.sticker.src);
+  /* 魔力计数：由蝙蝠返回时逐点积攒，不是随时间自动涨 */
+  check('缇娜带「魔力」资源条，上限 5',
+    !!tn.resource && tn.resource.max === 5 && tn.resource.gainPerSec === 0,
+    tn.resource ? `${tn.resource.name} ${tn.resource.max}（gainPerSec ${tn.resource.gainPerSec}）` : '无');
+  /* ⑤⑥⑦ 三个「公主传承」互斥 —— 作者确认过"三选一"。
+     这条是**通用不变量**（遍历全部球种的互斥组）之外的单点补充：
+     它确保这三个确实被归到同一组，而不是各成一个组。
+     注意这里直接用 mods.skills.xxx：下面的解构声明在文件更靠后的位置，
+     在这里用会踩 const 的暂时性死区。 */
+  check('三个「公主传承」同属 princess 互斥组',
+    ['tina_p1', 'tina_p2', 'tina_p3'].every(id => mods.skills.skillGroup(id) === 'princess'),
+    ['tina_p1', 'tina_p2', 'tina_p3'].map(id => mods.skills.skillGroup(id)).join('/'));
+  check('同时装三个传承时只留下一个',
+    mods.skills.resolveLoadout(['tina_p1', 'tina_p2', 'tina_p3']).length === 1);
+  /* 权杖与吸血习性的联动（作者："+15 不影响吸血习性的碰撞伤害"）是纯数值关系，
+     放在诊断里定量测（tests/diag/tina.mjs）—— 那里能真的建一局来比。 */
   check('小球字段完整', SPECIES.every(s => s.id && s.name && s.color));
   const res = SPECIES.filter(s => s.resource);
   check('存在带特殊资源的小球（验证血条下方资源条）', res.length > 0, res.map(s => s.name).join('、'));
@@ -686,6 +832,50 @@ console.log('\n【7】数据层');
     k.trigger && k.trigger.type === 'passive' && typeof k.passive !== 'function');
   check('被动技能都实现了 passive()', fakePassive.length === 0,
     fakePassive.map(k => k.id).join('、') || '全部有实现');
+  /* ---------- 通用不变量：弹道半径的单位 ----------
+     弹道的 r 是**定点数**（要乘 SCALE），但技能里写起来很容易顺手写成
+     "世界单位的那个数"。写漏了不会报错：半径变成 0.005 世界单位，
+     画面上是一个亚像素点（作者的原话是"看不到特效"），碰撞也几乎撞不到。
+     实测缇娜的蝙蝠和霰弹都栽在这一个乘号上。
+     与其给每个技能单独写一条断言，不如**遍历所有球种**跑一局、
+     检查每一枚出现过的弹道：以后谁再写漏，这里立刻变红。 */
+  {
+    const SCALE_V = mods.balls.SCALE;
+    const badR = [];
+    for (const sp of SPECIES) {
+      if (!sp.skills || !sp.skills.length) continue;
+      let b = null;
+      try {
+        b = new mods.core.Battle({
+          teams: [
+            { units: [{ stats: { ...mods.balls.makeUnitStats(sp.id) } }] },
+            { units: [{ stats: { ...mods.balls.makeUnitStats('test') } }] },
+          ],
+          arena: ARENAS.find(a => a.id === 'rect') || ARENAS[0],
+          sizeScale: 1,
+          rules: { ...mods.balls.DEFAULT_RULES, timeLimit: 4 },
+          seed: 11,
+        });
+      } catch { continue; }
+      for (let i = 0; i < 260 && !b.over; i++) {
+        b.step();
+        for (const pr of b.projectiles) {
+          const rw = pr.r / SCALE_V;
+          if (!(rw >= 1 && rw <= 40)) {
+            badR.push(`${sp.name}/${pr.tag || '?'}: r=${rw}`);
+          }
+          /* 宽度同理：激光/光柱的 w 是**世界单位**，也不该是天文数字或 0 */
+          if (pr.w != null && !(pr.w > 0 && pr.w <= 200)) {
+            badR.push(`${sp.name}/${pr.tag || '?'}: w=${pr.w}`);
+          }
+        }
+      }
+    }
+    check('所有球种的弹道半径都在合理范围（1~40 世界单位）',
+      badR.length === 0,
+      badR.length ? [...new Set(badR)].slice(0, 6).join('、') : `巡检了 ${SPECIES.filter(x => x.skills && x.skills.length).length} 个球种`);
+  }
+
   check('存在挂了技能的小球（技能系统有实际用例）', refs.length > 0,
     refs.map(r => `${r.sp.name}:${r.id}`).join('、'));
 

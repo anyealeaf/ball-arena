@@ -188,16 +188,23 @@ console.log('\n【⑥】辉光领域极光');
 {
   const withD = mk(['yuncai_domain'], { rules: { timeLimit: 5 } });
   const without = mk(['yuncai_modan'], { rules: { timeLimit: 5 } });
+  /* 极光现在是**一张贴图**（作者给的横向长图），不再是程序化画出来的色带。
+     所以判据从"多出若干次 fill"改成"多出一次画这张图"。
+     踩过：改实现之后这条断言红了 —— 不是功能坏了，是判据跟着实现走了。
+     现在它同时守住"画的是哪张图"，比数 fill 次数结实。 */
   const drawAndCount = (b) => {
     const ctx = makeCtx();
     const rd = new Renderer(makeCanvas(ctx));
     ctx.calls.length = 0;
     rd.draw(b, 1);
-    return ctx.calls.filter(c => c.n === 'fill').length;
+    return {
+      aurora: ctx.calls.filter(c => c.n === 'drawImage' && c.a[0] &&
+        String(c.a[0].src).includes('yuncai_aurora')).length,
+    };
   };
-  // 极光是多条 fill 出来的带子，装了领域应该明显多出若干次 fill
   const a = drawAndCount(withD), c = drawAndCount(without);
-  check('装了辉光领域会多画一层极光', a > c, `有领域 ${a} 次 fill / 无领域 ${c} 次`);
+  check('装了辉光领域会画出领域背景层', a.aurora > 0, `领域层 ${a.aurora} 次绘制`);
+  check('没装辉光领域时不画领域层', c.aurora === 0, `领域层 ${c.aurora} 次`);
   check('battle.aurora 标记为真', withD.aurora === true);
   check('没装领域时不画极光', without.aurora === false);
 }

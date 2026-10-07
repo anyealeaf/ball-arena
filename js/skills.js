@@ -194,6 +194,12 @@ export const YUNCAI = {
     cd: 2, dmg: 75, speed: 500, r: 6, life: 4, color: '#c4b5fd',
     hitsToLaser: 2,
     laserDmg: 150, laserSpeed: 1000, laserColor: '#e9d5ff',
+    /* 第三发是一道**锚定在晕彩身上、贯穿战场的光柱**。
+       长度取 1400：所有场地 × 所有尺寸里最长的对角线是 1266，
+       取比它更大就一定能从场地这头穿到那头。
+       速度只剩"方向"的含义 —— 光柱不飞，位置每帧从晕彩身上抄。 */
+    laserLen: 1400,
+    laserLife: 0.5,        // 只持续半秒
     /* 激光的粗细（世界单位，小球直径是 32）。
        注意这里只定义一次，渲染与判定都读它 —— 判定半径 = 宽度的一半。
        之前因为一个单位 bug，宽度被算成 0.016，画出来是一根看不见的头发丝，
@@ -321,9 +327,12 @@ export const SKILL_MODAN = {
   descDetail: `每 ${YUNCAI.modan.cd} 秒瞄准最近的敌人发射一枚淡紫色魔力球` +
         `（速度 ${YUNCAI.modan.speed}，伤害 ${YUNCAI.modan.dmg}，带"光"）。` +
         `命中判定包括两种：打中敌方小球，以及**被裁光的细线吸收** —— 两种都算一次命中。` +
-        `累计命中 ${YUNCAI.modan.hitsToLaser} 次后，下一发改为发射一道圆柱体光柱` +
-        `（速度 ${YUNCAI.modan.laserSpeed}，伤害 ${YUNCAI.modan.laserDmg}，宽度 ${YUNCAI.modan.laserWidth}，带"光"），` +
-        `激光会**穿透**目标：打中之后继续往前飞，沿途每个敌人各吃一次伤害，同一个目标不会重复结算。` +
+        `累计命中 ${YUNCAI.modan.hitsToLaser} 次后，下一发改为**贯穿战场的光柱**` +
+        `（伤害 ${YUNCAI.modan.laserDmg}，宽度 ${YUNCAI.modan.laserWidth}，带"光"）：` +
+        `一端钉在晕彩身上、朝发射那一刻的方向铺出去 ${YUNCAI.modan.laserLen} 单位，` +
+        `持续 ${YUNCAI.modan.laserLife} 秒。` +
+        `**不跟随目标**（方向定死），**每个敌人只结算一次**（不会反复掉血）。` +
+        `碰到「裁光」的细线时**不会消失**，但仍然提供"光"把细线喂进阶（每条只喂一次）。` +
         `发射后命中计数归零。`,
   trigger: { type: 'cooldown', cd: YUNCAI.modan.cd },
   run(ctx) {
@@ -333,9 +342,18 @@ export const SKILL_MODAN = {
     const hits = unit.flags.modanHits || 0;
 
     if (hits >= P.hitsToLaser) {
-      /* 第三发：激光。宽度 laserWidth，判定半径取它的一半 ——
-         粗细只定义一处，画多粗就判定多粗。
-         激光**穿透**目标：打中之后继续往前飞，沿途每个敌人各吃一次。 */
+      /* 第三发：**贯穿战场的光柱**（形态与缇娜的「公主传承3」同一种）。
+         和那道光的区别：
+           · 只持续 0.5 秒（缇娜是 2 秒）；
+           · **不跟随目标** —— 方向在发射那一刻定死（缇娜的光柱每帧朝目标转）；
+           · **只有一次伤害判定** —— 每个目标只结算一下（缇娜是每秒 3 次）。
+         相同的部分：一端钉在晕彩身上、向前画成圆柱、
+         长度够从场地这头穿到那头、判定与绘制共用同一组 beamLen / width。
+
+         另外两条刻意的设定：
+           · absorbable: false —— 碰到裁光的细线**不会消失**，
+             但**依然提供"光"**（细线照样进阶，每条只喂一次）；
+           · sweepOnce —— 每个敌人只吃一下，不会像 tickDamage 那样反复结算。 */
       unit.flags.modanHits = 0;
       const dx = target.x - unit.x, dy = target.y - unit.y;
       const d = Math.hypot(dx, dy) || 1;
@@ -345,11 +363,20 @@ export const SKILL_MODAN = {
         x: unit.x, y: unit.y,
         vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
         damage: battle._lightDamage(unit, P.laserDmg),
-        radius: Math.round((P.laserWidth / 2) * SCALE),
+        /* 碰撞半径只用于"撞墙夹紧"；它锚在晕彩身上，而她永远离墙 ≥ 她的半径，
+           所以这道光柱不会因为贴墙而消失。真正的伤害走下面的胶囊判定。 */
+        radius: Math.round(2 * SCALE),
         width: P.laserWidth,
         beam: true,
-        pierce: true,
-        life: 3, color: P.laserColor, traits: ['light'],
+        beamForward: true,        // 从晕彩身上**向前**画（普通激光是往后画拖影）
+        beamLen: P.laserLen,
+        anchor: unit.id,          // 一端始终钉在晕彩身上
+        /* 刻意**不设 anchorTarget** —— 设了就会每帧朝目标转向，那是缇娜的光柱 */
+        noBodyHit: true,          // 不走"贴到就爆"的弹体命中
+        sweepOnce: true,          // 每个目标只结算一次
+        absorbable: false,        // 穿过细线，但仍然喂它"光"
+        life: P.laserLife,
+        color: P.laserColor, traits: ['light'],
       });
     } else {
       const dx = target.x - unit.x, dy = target.y - unit.y;
@@ -513,7 +540,13 @@ export const SKILL_DOMAIN = {
   passive(battle, unit) {
     unit.dodge = unit.bloomed ? YUNCAI.domain.dodgeBloomed : YUNCAI.domain.dodge;
     battle.aurora = true;
-    battle._emit('domainOn', unit, null, 0);
+    /* 渲染层画"气浪展开"要用的三个量，只在激活这一刻写一次。
+       中心是**固定**的：气浪从晕彩当时的位置向外扩散到铺满全场；
+       若让它跟着晕彩走，离她远的那半边就永远扫不到。 */
+    battle.auroraAt = battle.frame;
+    battle.auroraCenter = { x: unit.x, y: unit.y };
+    battle.auroraStyle = unit.domain || null;
+    battle._emit('domainOn', unit, null, 0, { px: unit.x / SCALE, py: unit.y / SCALE });
   }
 };
 
@@ -635,6 +668,10 @@ export const TAOYAO = {
        层数现在只驱动"碰撞伤害 / 移速 / 转速"三件事。 */
     /* 每层旋转速度见 core.js 的 SPIN_RATE_PER_STACK */
   },
+
+  /* 箭矢贴图（作者提供）。映霞两式共用同一支箭的外观 ──
+     目前只有粉色这一张，所以只有「荣」用；「枯」是黑白的，等作者给图。 */
+  arrowSprite: 'assets/characters/taoyao_arrow.png',
 };
 
 /* 单位身上有没有装「认真拉矢」。
@@ -658,6 +695,11 @@ function fireArrow(battle, unit, target, spec) {
     (spec.damage + TAOYAO.aim.perStack * stacks) * (unit.damageMul ?? 1)));
   battle._spawnProjectile({
     kind: 'aura', tag: 'arrow', owner: unit,
+    sprite: spec.sprite || null,      // 有贴图就画成真箭，没有就回退程序化光点
+    /* 箭矢画多长：直接问单位身上挂着的弓配置（bowH × 箭占弓高的比例）。
+       这样"搭在弓上的箭"和"飞出去的箭"永远等长，改 bowH 也不用两头改。 */
+    spriteLen: (unit.bow && unit.bow.bowH && unit.bow.arrowLenFrac)
+      ? unit.bow.bowH * unit.bow.arrowLenFrac : 0,
     x: unit.x, y: unit.y,
     vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
     damage: dmg,
@@ -688,6 +730,21 @@ export const SKILL_RONG = {
   id: 'taoyao_rong',
   name: '映霞[荣]',
   group: 'yingxia',
+  /* 动作动画的两个开关（引擎在 _initUnitSkills 里读，见 core.js）：
+       aims   —— 这个技能"朝最近的敌人"出手，所以引擎每帧算一个瞄准角进快照；
+       windup —— 射出前的动作时长（秒）。引擎据此算出 castP（0→1，射出那一帧 = 1），
+                 渲染层拿它摆"拉弓"的姿势。
+     为什么 windup 是 0.4 而不是等于 cd：拉弓只该占冷却的最后一段，
+     否则弓会一直拉着，看起来像卡住了。 */
+  aims: true,
+  windup: 0.4,
+  /* 五连发是"同一种拉弓动作的另一个版本"：时长完全一样，
+     区别只在于画面上要多排四根箭。光看 castP 分不出这两种，
+     所以由这里告诉引擎"这一发是变体 1"（见 core.js 的 castKind）。 */
+  castKind(unit) {
+    const P = TAOYAO.rong;
+    return ((unit.flags.rongShots || 0) + 1 > P.burstEvery) ? 1 : 0;
+  },
   desc: '每1秒发射一支粉色的箭矢，箭矢移动速度为500，造成50伤害。' +
         '射击五次后，下一次会连续发射5发箭矢，每支伤害降低到30。',
   descDetail: `每 ${TAOYAO.rong.cd} 秒瞄准最近的敌人发射一支粉色箭矢` +
@@ -712,12 +769,12 @@ export const SKILL_RONG = {
         const dx = Math.cos(ang), dy = Math.sin(ang);
         fireArrow(battle, unit, {
           x: unit.x + dx * 1000, y: unit.y + dy * 1000,   // 借方向，用假目标
-        }, { ...P, damage: P.burstDmg, knockback: 0 });
+        }, { ...P, damage: P.burstDmg, knockback: 0, sprite: TAOYAO.arrowSprite });
       }
       battle._emit('arrowBurst', unit, target, n);
     } else {
       unit.flags.rongShots = fired;
-      fireArrow(battle, unit, target, P);
+      fireArrow(battle, unit, target, { ...P, sprite: TAOYAO.arrowSprite });
     }
     return true;
   }
@@ -730,6 +787,8 @@ export const SKILL_KU = {
   id: 'taoyao_ku',
   name: '映霞[枯]',
   group: 'yingxia',
+  aims: true,
+  windup: 0.4,
   desc: '每2秒发射一支黑白色的箭矢，箭矢移动速度为450，造成65伤害，' +
         '被命中后的小球移动速度减少20，持续2秒。',
   descDetail: `每 ${TAOYAO.ku.cd} 秒瞄准最近的敌人发射一支黑白箭矢` +
@@ -888,10 +947,506 @@ export const SKILL_TOP = {
   }
 };
 
+/* ============================================================
+   缇娜（球种 3）—— 吸血 / 蝙蝠 / 霰弹 / 权杖 / 公主传承
+   ------------------------------------------------------------
+   这一组技能把几套新引擎系统串起来，各自的开关写在 core.js 里：
+     · 吸附 latch        —— 位置按在目标身上（step 第 5.5 段）
+     · 沉默 silencedFrames —— 挡技能，撞墙类除外（_runSkills）
+     · 近战免疫 meleeImmuneFrames —— 被缠住时不吃碰撞伤害（_resolveAttacks）
+     · 移速乘子 speedMul —— "降低一半"是对折，不是减 20
+     · 追踪 homing       —— 每秒最多转多少度（转速上限，不是总偏角）
+     · 返程 returnTo     —— 命中后掉头回主人，抵达触发 onReturn
+     · 锚定光柱 anchor + tickDamage —— 从主人身上长出来、按节拍结算的范围伤害
+     · 时间停止 startTimeStop —— 冻位移/开火/冷却，但**不冻持续伤害**
+   ============================================================ */
+export const TINA = {
+  /* ① 吸血习性 */
+  suck: {
+    meleeTo: 30,          // 碰撞伤害锁死在 30（权杖的 +15 不影响它）
+    holdSeconds: 1.5,
+    /* 吸附持续帧数。刻意比 1.5 秒（90 帧）短 2 帧：
+       接触伤害的节拍是 0.5 秒，1.5 秒里正好 3 跳（0 / 0.5 / 1.0 秒）。
+       若撑满 90 帧，命中冷却在第 90 帧刚好归零，会多出第 4 跳。
+       所以"3 次"不是自己数出来的，是**节拍自然落成 3 次** —— 见 descDetail。 */
+    holdFrames: 88,
+    /* 免疫/沉默留得比吸附略久，保证松开那一帧不会漏出一个伤害 */
+    holdTailFrames: 95,
+    targetSpeedMul: 0.5,
+    /* 吸附**结束之后**的硬性间隔：这 1 秒内不会再吸附任何一个球。
+       从"吸附结束"起算，不是从"吸附开始"（作者原话：
+       "吸附吸血完成之后，一秒之内都不会再进行吸附吸血"）。
+       写进 unit.skillCd 实现 —— 引擎在分发 onHit 技能前会检查它，
+       所以是硬性的，不依赖技能自己的判断。 */
+    afterCooldown: 1,
+  },
+
+  /* ② 蝙蝠 */
+  bat: {
+    cd: 3,
+    minCount: 3, maxCount: 5,
+    /* 速度 150（原本 260）。
+       转弯半径 = 速度 ÷ 角速度：150 ÷ (60°×π/180) ≈ 143 世界单位，
+       权杖加成到 90°/秒后约 95 —— 场地约 700×500，这个半径才追得住人。
+       260 时半径是 248，蝙蝠基本直飞、只在末端划一道弧。 */
+    speed: 150,
+    turnPerSec: 60,       // 追踪转速上限（度/秒）
+    damage: 6, r: 5, life: 4,
+    /* 回到缇娜身上时回的血（作者 2026-10 从 6 下调到 3）。
+       注意「权杖」只提高**伤害**，不提高回血 —— 回血不是伤害。 */
+    heal: 3,
+    mana: 1,              // 回到缇娜身上时加的魔力
+    color: '#a21caf',
+  },
+
+  /* ③ 魔力霰弹 */
+  shot: {
+    cd: 2,                // 每 2 秒一轮
+    count: 3,
+    windowSeconds: 0.5,   // 一轮里的 3 发在 0.5 秒内打完
+    spreadDeg: 15,        // 每发随机偏 0~15°
+    damage: 30, speed: 420, r: 5, life: 2.2,
+    color: '#e11d48',     // 猩红
+  },
+
+  /* ④ 权杖（被动） */
+  scepter: { meleeBonus: 15, damageMul: 4 / 3, turnBonusDeg: 30 },
+
+  /* ⑤⑥⑦ 公主传承（三选一，互斥组见下） */
+  p1: { cd: 10, duration: 3 },
+  p2: { cd: 10 },
+  p3: {
+    cd: 10, chargeSeconds: 1, durationSeconds: 2,
+    tickPerSec: 3, damage: 35,
+    radius: 16,           // 直径 = 小球直径（球半径 16）
+    len: 420,             // 光柱长度（世界单位）
+    color: '#dc2626',
+  },
+};
+
+/* ---------- 小工具 ---------- */
+const TINA_SUCK_ID = 'tina_suck';
+const hasSkill = (unit, id) => !!(unit && unit.skills && unit.skills.includes(id));
+
+/* 权杖是否在身上。它是被动，装了就生效，所以别的技能按这个开关取修正值。 */
+const withScepter = (unit) => !!(unit && unit.flags && unit.flags.tinaScepter);
+
+/** 结束吸附：还原目标身上的减速，并给下一次吸附挂上硬性间隔。
+ *  **两条结束路径（到期 / 目标阵亡）都要走这里** ——
+ *  以前只有到期那条写了"还原减速"，目标中途死掉的话减速就永远留在它身上了。 */
+function endLatch(battle, unit, target) {
+  unit.latch = null;
+  if (target) {
+    if (target.speedMul === TINA.suck.targetSpeedMul) {
+      target.speedMul = 1;
+      battle.refreshSpeed(target);
+    }
+    battle._emit('latchEnd', unit, target, 0);
+  }
+  /* 硬性间隔：从**吸附结束**起算，1 秒内不再吸附任何球。
+     写进 skillCd 之后由引擎统一递减与拦截，技能自己不用再判断。 */
+  unit.skillCd = unit.skillCd || {};
+  unit.skillCd[TINA_SUCK_ID] = TINA.suck.afterCooldown;
+  battle._emit('latchCooldown', unit, null, TINA.suck.afterCooldown);
+}
+
+/** 开始吸附。①的撞击触发与⑥的瞬移触发共用这一段 ——
+ *  两处各写一遍的话，"3 跳""免疫""减半"很容易只改到一处。 */
+function startLatch(battle, unit, other) {
+  if (!other || !other.alive || unit.latch) return false;
+  const T = TINA.suck;
+  unit.latch = { targetId: other.id, untilFrame: battle.frame + T.holdFrames };
+  unit.meleeImmuneFrames = T.holdTailFrames;
+  other.silencedFrames = T.holdTailFrames;
+  other.speedMul = T.targetSpeedMul;
+  battle.refreshSpeed(other);
+  battle._emit('latch', unit, other, T.holdSeconds);
+  return true;
+}
+
+/* ---------- ② 的蝙蝠：一次发射与"返程结算"都收在这里 ---------- */
+function fireBat(battle, unit, target) {
+  if (!target || !target.alive) return null;
+  const P = TINA.bat;
+  const scep = withScepter(unit);
+  const turn = P.turnPerSec + (scep ? TINA.scepter.turnBonusDeg : 0);
+  const dmg = Math.max(1, Math.round(P.damage * (scep ? TINA.scepter.damageMul : 1)));
+  const dx = target.x - unit.x, dy = target.y - unit.y;
+  const d = Math.hypot(dx, dy) || 1;
+  const spd = P.speed * SCALE;
+  /* 初始方向：朝目标，但**随机散开一点** ——
+     3~5 只如果完全同向重叠，看起来只有一只。 */
+  const base = Math.atan2(dy, dx) + (battle.rnd() * 2 - 1) * 0.5;
+  return battle._spawnProjectile({
+    kind: 'body', tag: 'bat', owner: unit,
+    x: unit.x, y: unit.y,
+    vx: Math.round(Math.cos(base) * spd),
+    vy: Math.round(Math.sin(base) * spd),
+    damage: dmg,
+    /* 半径是**定点数**（×SCALE）—— 漏了这个乘号，半径就成了 0.005 世界单位，
+       画面上是一个亚像素点，等于"看不到特效"。 */
+    radius: Math.round(P.r * SCALE),
+    life: P.life, color: P.color,
+    homing: { targetId: target.id, turnPerSec: turn },
+    returnTo: unit.id,
+    onHit: (b, from, to) => { if (from && to) from.flags.batLastHit = to.id; },
+    onReturn: (b, from) => {
+      b._heal(from, P.heal);
+      b._gainResource(from, P.mana, 'bat');
+      b._emit('batReturn', from, null, P.heal);
+      /* 魔力满 → 偷学一次，然后清零重新攒 */
+      if (from.resMax > 0 && from.res >= from.resMax) {
+        from.res = 0;
+        b._emit('manaBurst', from, null, 0);
+        stealAndCast(b, from);
+      }
+    },
+  });
+}
+
+/** 能被"偷学"的技能：**能释放一次的主动技能**。
+ *  作者口径是排除"领域类 / 近战类 / 碰撞墙壁类"，这三类在本项目里恰好
+ *  全都是被动（辉光领域、折光）或撞墙触发（裁光），所以一条规则就够：
+ *    有 run()（被动没有）+ 不是 onWall（碰撞墙壁类）
+ *  比逐个点名白名单稳 —— 以后新加的技能自动被正确归类。 */
+function stealableFrom(victim) {
+  const out = [];
+  for (const id of victim.skills || []) {
+    const sk = getSkill(id);
+    if (!sk || typeof sk.run !== 'function') continue;
+    if (!sk.trigger || sk.trigger.type === 'onWall') continue;
+    if (sk.noSteal) continue;
+    out.push(sk);
+  }
+  return out;
+}
+
+/** 抽victim一个技能、用缇娜的身份放一次。
+ *  注意**不设冷却** —— 缇娜并没有这个技能，设了也没人读。 */
+function stealAndCast(battle, tina) {
+  const victim = battle.units[tina.flags.batLastHit];
+  if (!victim || !victim.alive) return null;
+  const pool = stealableFrom(victim);
+  if (!pool.length) return null;
+  const sk = pool[Math.floor(battle.rnd() * pool.length) % pool.length];
+  const target = battle._nearestEnemy(tina);
+  let ok = false;
+  try {
+    ok = !!sk.run({ battle, unit: tina, target });
+  } catch (e) {
+    /* 偷来的技能可能在原主身上有前置状态。失败不该把整局带崩 ——
+       emit 一条事件，诊断里能看到，但不影响这一局继续跑。 */
+    battle._emit('stealFail', tina, victim, 0, { skill: sk.name, err: String(e && e.message) });
+    return null;
+  }
+  battle._emit('steal', tina, victim, ok ? 1 : 0, { skill: sk.name });
+  return sk;
+}
+
+/* ------------------------------------------------------------
+   ① 吸血习性
+   ------------------------------------------------------------ */
+export const SKILL_TINA_SUCK = {
+  id: 'tina_suck',
+  name: '吸血习性',
+  desc: '碰撞伤害降低到30，但是碰撞后会吸附在对方小球身上1.5秒，' +
+        '这期间对方小球无法使用技能（除碰撞墙体使用的技能以外），移速降低一半。' +
+        '同时，在这1.5秒内，会造成3次缇娜的碰撞伤害，缇娜会回复对应数值的生命值。' +
+        '并且缇娜自己在这段时间不会受到碰撞伤害。回复数值不会超过缇娜的生命上限。' +
+        '吸附结束后有1秒的间隔，期间不会再次吸附。',
+  descDetail: `碰撞伤害被**锁死在 ${TINA.suck.meleeTo}**（权杖的 +${TINA.scepter.meleeBonus} 不影响它）。` +
+        `撞到敌方小球后吸附在它身上 ${TINA.suck.holdSeconds} 秒，期间：` +
+        `目标**无法发动技能**（撞墙类除外）、移速 ×${TINA.suck.targetSpeedMul}；` +
+        `缇娜**不受碰撞伤害**。` +
+        `这 1.5 秒里正好结算 **3 次**接触伤害，每一次缇娜都回复等量生命（不超过生命上限）。` +
+        `"3 次"不是自己数的：接触伤害的节拍是 0.5 秒一次，` +
+        `吸附把两颗球按在一起，节拍自然落下 3 跳；吸附刻意比 1.5 秒早 2 帧松开，` +
+        `以免第 90 帧命中冷却归零多出第 4 跳。` +
+        `**吸附结束后 ${TINA.suck.afterCooldown} 秒内不会再吸附任何球**（硬性间隔，从吸附结束起算）。`,
+  trigger: { type: 'onHit' },
+  passive(battle, unit) {
+    /* 用"锁"而不是"减 20"：权杖的 +15 与它互不影响，
+       锁成 30 之后 refreshMelee 会直接返回 30。 */
+    unit.meleeLock = TINA.suck.meleeTo;
+    battle.refreshMelee(unit);
+  },
+  run(ctx) {
+    const { battle, unit, other } = ctx;
+    const ok = startLatch(battle, unit, other);
+    /* 触发吸附的那一下接触伤害**发生在 run() 之前**（引擎先结算伤害、
+       再分发 onHit 技能），那时 latch 还没建立，所以 onHit 钩子把它挡掉了。
+       实测结果是"3 跳只回了 2 次血" —— 这里把第一次补上。
+       伤害值直接用 _meleeDamage(unit)：触发它的就是缇娜的碰撞伤害。 */
+    if (ok) {
+      const first = battle._meleeDamage(unit);
+      if (first > 0) {
+        battle._heal(unit, first);
+        battle._emit('drain', unit, other, first);
+      }
+    }
+    return ok;
+  },
+  hooks: {
+    /* 吸附期间每一次接触伤害都按数值回血。
+       直接用"造成伤害"这个钩子，就不必自己维护跳数 ——
+       跳数由接触伤害的节拍决定，"3 次"是它的自然结果。 */
+    onHit(battle, unit, ctx) {
+      if (!unit.latch || !ctx || ctx.kind !== 'melee') return;
+      battle._heal(unit, ctx.dmg);
+      battle._emit('drain', unit, ctx.target, ctx.dmg);
+    },
+    onThink(battle, unit) {
+      const l = unit.latch;
+      if (!l) return;
+      const t = battle.units[l.targetId];
+      /* 目标中途死了也要走 endLatch：以前这里直接 unit.latch = null，
+         结果"还原减速 + 挂间隔"两件事都被跳过。 */
+      if (!t || !t.alive) { endLatch(battle, unit, t || null); return; }
+      if (battle.frame >= l.untilFrame) { endLatch(battle, unit, t); return; }
+      /* 每帧续期：引擎每帧递减，续到 3 帧就足够覆盖整个吸附时间 */
+      t.silencedFrames = Math.max(t.silencedFrames, 3);
+      unit.meleeImmuneFrames = Math.max(unit.meleeImmuneFrames, 3);
+    },
+  },
+};
+
+/* ------------------------------------------------------------
+   ② 蝙蝠
+   ------------------------------------------------------------ */
+export const SKILL_TINA_BAT = {
+  id: 'tina_bat',
+  name: '蝙蝠',
+  desc: '每3秒释放带有追踪能力的3~5只小蝙蝠，每只蝙蝠在追踪时最多进行60度的偏转，' +
+        '蝙蝠命中后对敌方小球造成6点伤害，随后会返回缇娜身上，' +
+        '每只蝙蝠返回会恢复缇娜3点生命值，并提供一点魔力计数。' +
+        '魔力计数满5点后，根据蝙蝠最后命中的目标，缇娜会随机抽取其一个技能' +
+        '（不会释放领域类、近战类、以及碰撞墙壁类的技能）释放一次。',
+  descDetail: `每 ${TINA.bat.cd} 秒放出一批 **${TINA.bat.minCount}~${TINA.bat.maxCount} 只**小蝙蝠，` +
+        `朝最近的敌人追踪：速度 ${TINA.bat.speed}，**每秒最多偏转 ${TINA.bat.turnPerSec}°**` +
+        `（是"转速上限"而不是"总偏角上限"——追不到就会绕圈追）。` +
+        `命中造成 ${TINA.bat.damage} 伤害，然后**掉头飞回缇娜**；` +
+        `每只回到身上时回复 ${TINA.bat.heal} 点生命（**回血不吃权杖加成** —— 权杖提高的是伤害）、` +
+        `魔力 +${TINA.bat.mana}。` +
+        `魔力满 ${5} 点后清空，并按**最后命中的目标**随机抽它一个技能放一次。` +
+        `可偷的范围是"能释放一次的主动技能"：被动（辉光领域、折光、认真拉矢、陀螺…）` +
+        `没有"释放一次"这回事，撞墙触发的（裁光）也在排除之列。` +
+        `装上「权杖」后：伤害 ×4/3，偏转角 +${TINA.scepter.turnBonusDeg}°（→ ${TINA.bat.turnPerSec + TINA.scepter.turnBonusDeg}°/秒）。`,
+  trigger: { type: 'cooldown', cd: TINA.bat.cd },
+  run(ctx) {
+    const { battle, unit, target } = ctx;
+    const t = target || battle._nearestEnemy(unit);
+    if (!t) return false;
+    const n = TINA.bat.minCount +
+      Math.floor(battle.rnd() * (TINA.bat.maxCount - TINA.bat.minCount + 1));
+    for (let i = 0; i < n; i++) fireBat(battle, unit, t);
+    battle._emit('batSwarm', unit, t, n);
+    return true;
+  },
+};
+
+/* ------------------------------------------------------------
+   ③ 魔力霰弹
+   ------------------------------------------------------------ */
+export const SKILL_TINA_SHOT = {
+  id: 'tina_shot',
+  name: '魔力霰弹',
+  desc: '对着敌方小球在0.5秒内连续发射三个猩红色魔弹，发射间隔为2秒，' +
+        '每颗魔弹发射时都会随机出现0~15°的角度偏差，每颗魔弹伤害为30.',
+  descDetail: `每 ${TINA.shot.cd} 秒打出一轮 **${TINA.shot.count} 发**：` +
+        `第 1 发立刻出手，其余两发在 ${TINA.shot.windowSeconds} 秒内均匀打完（间隔 ${(TINA.shot.windowSeconds / (TINA.shot.count - 1)).toFixed(2)} 秒）。` +
+        `每发在瞄准方向上随机偏 **0~${TINA.shot.spreadDeg}°**，每发 ${TINA.shot.damage} 伤害` +
+        `（一轮合计 ${TINA.shot.damage * TINA.shot.count}）。` +
+        `装上「权杖」后每发 ×4/3 → ${Math.round(TINA.shot.damage * TINA.scepter.damageMul)}。`,
+  trigger: { type: 'cooldown', cd: TINA.shot.cd },
+  run(ctx) {
+    const { battle, unit } = ctx;
+    const t = battle._nearestEnemy(unit);
+    if (!t) return false;
+    fireShot(battle, unit, t);
+    /* 剩下两发交给 onThink 按节拍补完 —— 一排三发同时出膛就没有"连射"的意思了 */
+    unit.flags.volleyLeft = TINA.shot.count - 1;
+    unit.flags.volleyTimer = TINA.shot.windowSeconds / (TINA.shot.count - 1);
+    return true;
+  },
+  hooks: {
+    onThink(battle, unit) {
+      if (!unit.flags.volleyLeft) return;
+      unit.flags.volleyTimer -= DT;
+      if (unit.flags.volleyTimer > 0) return;
+      unit.flags.volleyTimer += TINA.shot.windowSeconds / (TINA.shot.count - 1);
+      unit.flags.volleyLeft--;
+      const t = battle._nearestEnemy(unit);
+      if (t) fireShot(battle, unit, t);
+    },
+  },
+};
+
+function fireShot(battle, unit, target) {
+  const P = TINA.shot;
+  const scep = withScepter(unit);
+  const dmg = Math.max(1, Math.round(P.damage * (scep ? TINA.scepter.damageMul : 1)));
+  const base = Math.atan2(target.y - unit.y, target.x - unit.x);
+  const off = (battle.rnd() * 2 - 1) * ((P.spreadDeg * Math.PI) / 180);
+  const a = base + off;
+  const spd = P.speed * SCALE;
+  battle._spawnProjectile({
+    kind: 'aura', tag: 'tina_shot', owner: unit,
+    x: unit.x, y: unit.y,
+    vx: Math.round(Math.cos(a) * spd),
+    vy: Math.round(Math.sin(a) * spd),
+    damage: dmg, radius: Math.round(P.r * SCALE), life: P.life, color: P.color,
+  });
+  /* 不要再 emit('shoot') —— _spawnProjectile 自己就会发一条
+     （带 px/py/color/tag）。技能里再发一次的话，上层统计里每发魔弹会变成两发。 */
+}
+
+/* ------------------------------------------------------------
+   ④ 权杖（被动）
+   ------------------------------------------------------------ */
+export const SKILL_TINA_SCEPTER = {
+  id: 'tina_scepter',
+  name: '权杖',
+  desc: '碰撞伤害提高15点（不影响吸血习性的碰撞伤害），' +
+        '魔力霰弹和蝙蝠的伤害各提高三分之一，且增加30°的追踪偏转角。',
+  descDetail: `被动。碰撞伤害 **+${TINA.scepter.meleeBonus}**（${50} → ${50 + TINA.scepter.meleeBonus}）——` +
+        `但如果同时装了「吸血习性」，碰撞伤害仍是被锁死的 ${TINA.suck.meleeTo}，这 +15 不生效。` +
+        `「魔力霰弹」与「蝙蝠」的伤害各 **×4/3**` +
+        `（霰弹 ${TINA.shot.damage} → ${Math.round(TINA.shot.damage * TINA.scepter.damageMul)}，` +
+        `蝙蝠 ${TINA.bat.damage} → ${Math.round(TINA.bat.damage * TINA.scepter.damageMul)}）；` +
+        `蝙蝠的追踪偏转角 **+${TINA.scepter.turnBonusDeg}°**（${TINA.bat.turnPerSec} → ${TINA.bat.turnPerSec + TINA.scepter.turnBonusDeg}°/秒）。`,
+  trigger: { type: 'passive' },
+  passive(battle, unit) {
+    unit.flags.tinaScepter = true;
+    unit.meleeBonus = (unit.meleeBonus || 0) + TINA.scepter.meleeBonus;
+    battle.refreshMelee(unit);
+  },
+};
+
+/* ------------------------------------------------------------
+   ⑤⑥⑦ 公主传承 —— 三个互斥，只能选一个
+   ------------------------------------------------------------ */
+export const SKILL_TINA_P1 = {
+  id: 'tina_p1',
+  name: '公主传承1',
+  group: 'princess',
+  desc: '每隔10秒使用一次，造成持续3秒的时间停止，表现为全场除了缇娜以外的球全部褪色，' +
+        '此时场上除了缇娜以及缇娜技能产出的攻击外，所有小球和攻击均不会移动。',
+  descDetail: `每 ${TINA.p1.cd} 秒发动一次**时间停止**，持续 ${TINA.p1.duration} 秒。` +
+        `表现：除缇娜外的球**全部褪色**（渲染层按快照里的豁免者下标做灰度）。` +
+        `效果（作者确认过的口径）：除缇娜自己与她的技能产物外，` +
+        `**小球不能移动、不能开火、技能冷却也停**；` +
+        `但**灼烧 / 细线之类的持续伤害照常结算** —— 站在火里照样掉血。` +
+        `与另外两个「公主传承」互斥，三个只能选一个。`,
+  trigger: { type: 'cooldown', cd: TINA.p1.cd },
+  run(ctx) {
+    const { battle, unit } = ctx;
+    battle.startTimeStop(unit, TINA.p1.duration);
+    return true;
+  },
+};
+
+export const SKILL_TINA_P2 = {
+  id: 'tina_p2',
+  name: '公主传承2',
+  group: 'princess',
+  desc: '每隔10秒使用一次，缇娜瞬间发动一次蝙蝠（不论有没有携带），' +
+        '然后瞬移到锁定的小球边上进行碰撞（如果携带了吸血习性，则会直接吸附吸血）。',
+  descDetail: `每 ${TINA.p2.cd} 秒发动一次：先**立刻放出一只蝙蝠**（即使没装「蝙蝠」也会放），` +
+        `然后**瞬移**到锁定目标的旁边、贴上去撞一下。` +
+        `如果装了「吸血习性」，这次撞击直接进入**吸附吸血**（省掉"撞上了才算"的随机性）。` +
+        `与另外两个「公主传承」互斥，三个只能选一个。`,
+  trigger: { type: 'cooldown', cd: TINA.p2.cd },
+  run(ctx) {
+    const { battle, unit, target } = ctx;
+    const t = target || battle._nearestEnemy(unit);
+    if (!t || !t.alive) return false;
+    /* ① 先放蝙蝠（与是否携带「蝙蝠」无关） */
+    fireBat(battle, unit, t);
+    /* ② 瞬移到它旁边。用"原方向的延长线"落位，比直接贴到圆心再分离更稳：
+       直接重合会被分离逻辑弹开一个随机方向。 */
+    const dx = unit.x - t.x, dy = unit.y - t.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const gap = unit.r + t.r;
+    unit.x = Math.round(t.x + (dx / d) * gap);
+    unit.y = Math.round(t.y + (dy / d) * gap);
+    battle._emit('blink', unit, t, 0, { px: unit.x / SCALE, py: unit.y / SCALE });
+    /* ③ 带了吸血习性就直接吸附 */
+    if (hasSkill(unit, 'tina_suck')) startLatch(battle, unit, t);
+    return true;
+  },
+};
+
+export const SKILL_TINA_P3 = {
+  id: 'tina_p3',
+  name: '公主传承3',
+  group: 'princess',
+  desc: '每隔10秒使用一次，缇娜蓄力1秒后持续发射一条直径与小球一致的猩红色光柱，' +
+        '光柱为笔直圆柱体，一端始终在缇娜上，会随着锁定目标的移动转向。' +
+        '光柱持续2秒，每秒造成3次攻击判定，每次攻击判定造成35点伤害。',
+  descDetail: `每 ${TINA.p3.cd} 秒发动一次：蓄力 ${TINA.p3.chargeSeconds} 秒后，` +
+        `从缇娜身上射出一条**锚定的**猩红光柱，持续 ${TINA.p3.durationSeconds} 秒。` +
+        `光柱直径 ${TINA.p3.radius * 2}（与小球直径一致），一端**始终钉在缇娜身上**，` +
+        `另一端随锁定目标移动而转向。` +
+        `每秒 ${TINA.p3.tickPerSec} 次判定、每次 ${TINA.p3.damage} 伤害 ` +
+        `（共 ${TINA.p3.tickPerSec * TINA.p3.durationSeconds} 次，合计 ${TINA.p3.tickPerSec * TINA.p3.durationSeconds * TINA.p3.damage}）。` +
+        `判定范围与画出来的光柱**同宽同长**（共用弹道上的 beamLen / w）。` +
+        `与另外两个「公主传承」互斥，三个只能选一个。`,
+  trigger: { type: 'cooldown', cd: TINA.p3.cd },
+  run(ctx) {
+    const { battle, unit } = ctx;
+    if (!battle._nearestEnemy(unit)) return false;
+    /* 蓄力：先记下"什么时候该开火"，真正的发射在 onThink 里 */
+    unit.flags.p3At = battle.frame + Math.round(TINA.p3.chargeSeconds / DT);
+    battle._emit('chargeStart', unit, null, TINA.p3.chargeSeconds, { skill: '公主传承3' });
+    return true;
+  },
+  hooks: {
+    onThink(battle, unit) {
+      if (!unit.flags.p3At) return;
+      if (battle.frame < unit.flags.p3At) return;
+      unit.flags.p3At = 0;
+      const t = battle._nearestEnemy(unit);
+      if (!t) return;
+      const P = TINA.p3;
+      const a = Math.atan2(t.y - unit.y, t.x - unit.x);
+      const spd = 600 * SCALE;
+      battle._spawnProjectile({
+        kind: 'aura', tag: 'tina_beam', owner: unit,
+        x: unit.x, y: unit.y,
+        vx: Math.round(Math.cos(a) * spd),
+        vy: Math.round(Math.sin(a) * spd),
+        damage: 0,              // 伤害走 tickDamage，不走弹体命中
+        /* 这个 r 只被"撞墙夹紧"用到（命中已被 noBodyHit 跳过），
+           但同样要是定点数，否则夹紧判定按 0.002 世界单位算。 */
+        radius: Math.round(2 * SCALE),
+        width: P.radius * 2,    // 宽度 = 直径（世界单位），与小球一致
+        beam: true,
+        beamForward: true,      // 从缇娜身上**向前**画
+        beamLen: P.len,
+        life: P.durationSeconds,
+        color: P.color,
+        anchor: unit.id, anchorTarget: t.id,
+        noBodyHit: true,
+        tickDamage: P.damage,
+        tickInterval: 1 / P.tickPerSec,
+        tickKind: 'skill',
+      });
+      battle._emit('beamStart', unit, t, P.durationSeconds);
+    },
+  },
+};
+
 /* ------------------------------------------------------------
    注册表：小球通过 skills: ['test_shot','test_dash'] 引用
    ------------------------------------------------------------ */
 export const SKILLS = {
+  [SKILL_TINA_SUCK.id]: SKILL_TINA_SUCK,
+  [SKILL_TINA_BAT.id]: SKILL_TINA_BAT,
+  [SKILL_TINA_SHOT.id]: SKILL_TINA_SHOT,
+  [SKILL_TINA_SCEPTER.id]: SKILL_TINA_SCEPTER,
+  [SKILL_TINA_P1.id]: SKILL_TINA_P1,
+  [SKILL_TINA_P2.id]: SKILL_TINA_P2,
+  [SKILL_TINA_P3.id]: SKILL_TINA_P3,
   [SKILL_SHOT.id]: SKILL_SHOT,
   [SKILL_DASH.id]: SKILL_DASH,
   [SKILL_CAIGUANG.id]: SKILL_CAIGUANG,

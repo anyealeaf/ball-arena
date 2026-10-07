@@ -16,6 +16,19 @@ import { SNAP_STRIDE, PROJ_STRIDE, FIELD_STRIDE } from './core.js';
 
 const FONT = '"Segoe UI","Microsoft YaHei",system-ui,sans-serif';
 
+/* 光柱（激光）各层的不透明度。
+   **本体这一层就是"光柱的透明度"**，作者定在 75%。
+
+   注意三层会**叠加**，所以肉眼看到的比 0.75 更实：
+     本体 0.75 + 柔光外壳 0.21  →  中间实心带约 80%
+     再叠白色高光核心线         →  正中心约 94%
+   要让整道光柱更透，调这一个数就行（柔光与核心都按比例跟着走）；
+   如果只是嫌正中间那条白线太亮，调 BEAM_CORE。 */
+const BEAM_ALPHA = 0.75;
+const BEAM_GLOW = 0.28;      // 柔光外壳相对本体的比例
+const BEAM_CORE = 0.95;      // 中心高亮核心线相对本体的比例
+
+
 /* 把 #rgb / #rrggbb 颜色转成带透明度的 rgba()。
    弹道外发光需要"同一个颜色、不同透明度"的多个渐变色标，
    直接用 globalAlpha 会让整块渐变一起变淡，出不来发光感。 */
@@ -56,7 +69,29 @@ export function preloadStickers(speciesList) {
     if (sp && sp.sticker && sp.sticker.src) getSticker(sp.sticker.src);
     // 形态切换的第二张贴图（如晕彩的开华形态）也要预热，否则切换瞬间会闪一下纯色圆
     if (sp && sp.stickerBloom && sp.stickerBloom.src) getSticker(sp.stickerBloom.src);
+    /* 手持物件（弓）同理。多帧的话每一帧都要预热 ——
+       否则拉到某一帧才第一次去加载，会看到弓闪一下不见了。 */
+    if (sp && sp.bow) {
+      if (sp.bow.src) getSticker(sp.bow.src);
+      for (const f of sp.bow.frames || []) if (f && f.src) getSticker(f.src);
+    }
+    /* 辉光领域的背景长图同理 —— 不预热的话展开动画会从"空白"开始，
+       气浪扫过去一片空，等图加载完才补上。 */
+    if (sp && sp.domain && sp.domain.src) getSticker(sp.domain.src);
   }
+}
+
+/** 按施法进度 castP 挑弓的动作状态 —— 与作者的描述一一对应：
+ *    castP = 0        → idle 平时（弓举着，弦是直的）
+ *    0 < castP < 1    → draw 准备射箭（弦拉开，搭好一支箭）
+ *    castP = 1        → shot 射箭那一帧（弓回到平时，箭已经离弦）
+ *  `shot` 没单独给图就回退成 idle，也就是作者说的"射箭的时候切换为 1"。
+ *  射箭那一帧只持续一帧（16ms），是刻意的"撒放"效果 —— 弓啪地弹回去。 */
+function bowStateSrc(bow, castP) {
+  if (!bow) return null;
+  if (castP <= 0) return bow.idle;
+  if (castP >= 0.999) return bow.shot || bow.idle;
+  return bow.draw;
 }
 
 export class Renderer {
@@ -122,8 +157,16 @@ export class Renderer {
     cv.height = Math.round(dispH * bufScale);
     this._bufScale = bufScale;
 
-    // 相机：把场地包围盒映射到整块画布（贴边，不留额外边距）
-    this.camScale = scale;
+    /* 相机：把场地包围盒映射到整块画布（贴边，不留额外边距）。
+       **这里必须用 cv.width（缓冲区宽度），不能用 dispW（CSS 宽度）。**
+       draw() 是在缓冲区坐标系上 ctx.scale()，而缓冲区比 CSS 尺寸大 bufScale 倍
+       （高清屏 dpr，或用 MAX_BUF_W 压过的值）。
+       写成 dispW / boxW 的话，场地只铺满画布的 1/bufScale：
+       dpr=1 时看不出来，dpr=1.25/1.5/2 的屏幕上就会在右边和下边留一条空白 ——
+       作者在 135% 缩放的机器上看到"战场铺不满画布"就是这个。
+       一直没被测出来，是因为 smoke 里 devicePixelRatio=1，而且那条断言比的是
+       camScale × boxW ≈ cssW —— 按构造必然成立，等于没测。 */
+    this.camScale = cv.width / boxW;
     this.camX = box.minX;
     this.camY = box.minY;
     this.boxW = boxW;
@@ -199,10 +242,14 @@ export class Renderer {
       : { ...battle.arena, effects: { ...(battle.arena.effects || {}), shrink: null } };
     const shape = effectiveShape(arenaForShape, time);
 
+    /* 记下这一帧的场地几何：光柱要按它裁剪（见 _projectiles）。
+       不裁的话，1400 单位长的贯穿光柱会冲出场地，
+       在圆形/多边形场地里就会画到场地外面那段空白上。 */
+    this._frameShape = shape;
     this._zones(ctx, battle.arena);
     this._shape(ctx, shape, battle.rules.allowShrink && battle.arena.effects?.shrink);
     /* 辉光领域铺在场地之上、小球之下：它是背景氛围，不该盖住任何东西 */
-    if (battle.aurora) this._aurora(ctx, snap.f);
+    if (battle.aurora) this._aurora(ctx, battle, snap);
     this._events(ctx, battle, snap.f);
     /* 弹道画在小球下面：飞行物从球体背后穿过去，视觉上更清楚，
        也不会盖住血条。 */
@@ -360,35 +407,127 @@ export class Renderer {
 
   /* ---------- 辉光领域：全场极光 ----------
      画在场地之上、小球之下，是一层半透明的流动极光带。 */
-  _aurora(ctx, frame) {
+  /* ---------- 辉光领域（晕彩） ----------
+     两段：
+       ① 展开：一圈气浪从**激活时晕彩所在的位置**向外扩散，扫到哪、领域就从哪浮现
+          （实现是两次 clip 求交：场地形状 ∩ 气浪圆）；
+       ② 展开完成后：背景缓慢向右滚动 + 稳定在较低的不透明度。
+
+     全部由 snap.f 推出来 —— 暂停会冻在那一帧、拖进度条会跟着倒回去。
+     引擎只给三个**静态**量（何时激活、中心、美术配置），
+     它们不需要每帧进快照，理由和 battle.aurora 这个布尔量一样。
+
+     滚动用的是**镜像平铺**：把图片按"正-反-正-反"首尾相接铺开，
+     横向移动时接缝两边的像素本来就相同，所以永远看不到跳变。
+     直接平移一张不循环的图，到边界那一下会"啪"地跳回去。 */
+  _aurora(ctx, battle, snap) {
+    const cfg = battle.auroraStyle;
+    if (!cfg || !cfg.src) return;
+    const st = getSticker(cfg.src);
+    if (!st || !st.ready || st.failed) return;
+
     const box = this._arenaBox();
     const w = box.maxX - box.minX, h = box.maxY - box.minY;
-    const t = frame / 60;
+    if (!(w > 0 && h > 0)) return;
+
+    const cx = battle.auroraCenter ? battle.auroraCenter.x / SCALE : box.minX + w / 2;
+    const cy = battle.auroraCenter ? battle.auroraCenter.y / SCALE : box.minY + h / 2;
+    const elapsed = Math.max(0, (snap.f - (battle.auroraAt ?? 0)) / 60);
+    const dur = Math.max(0.05, cfg.revealSeconds ?? 1.3);
+    const p = Math.min(1, elapsed / dur);
+
+    /* 要多大半径才能铺满全场：取离中心最远的那个角 */
+    const corner = Math.max(
+      Math.hypot(cx - box.minX, cy - box.minY),
+      Math.hypot(cx - box.maxX, cy - box.minY),
+      Math.hypot(cx - box.minX, cy - box.maxY),
+      Math.hypot(cx - box.maxX, cy - box.maxY));
+    const ease = 1 - Math.pow(1 - p, 3);          // easeOutCubic：气浪先快后慢地铺开
+    const waveR = corner * ease + 2;
+
+    ctx.save();
+    this._arenaClip(ctx);
+    /* ① 领域层：只在气浪扫过的圆里可见 */
     ctx.save();
     ctx.beginPath();
-    ctx.rect(box.minX, box.minY, w, h);
+    ctx.arc(cx, cy, waveR, 0, Math.PI * 2);
     ctx.clip();
-    for (let i = 0; i < 7; i++) {
-      const band = i / 7;
-      const yBase = box.minY + h * (band + 0.04 * Math.sin(t * 0.6 + i));
-      const amp = h * 0.07;
-      ctx.globalAlpha = 0.085 + 0.05 * Math.sin(t * 0.9 + i * 1.7);
-      ctx.fillStyle = ['#7dd3fc', '#a78bfa', '#f0abfc'][i % 3];
-      ctx.beginPath();
-      ctx.moveTo(box.minX, yBase);
-      for (let px = 0; px <= w; px += 24) {
-        const yy = yBase + Math.sin((px / w) * 5 + t * 1.3 + i) * amp;
-        ctx.lineTo(box.minX + px, yy);
+
+    const img = st.img;
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    /* 按**高度**等比缩放：竖直方向刚好铺满，横向必然溢出（图是 7:3），
+       溢出的那部分正好拿来滚动。绝不拉伸。 */
+    const drawH = h;
+    const drawW = drawH * (iw / ih);
+
+    const fadeIn = cfg.fadeInPortion ?? 0.25;
+    const alpha = (cfg.opacity ?? 0.4) * Math.min(1, fadeIn > 0 ? p / fadeIn : 1);
+    ctx.globalAlpha = alpha;
+
+    /* ② 展开完成后开始滚动。用 elapsed 而不是 p —— p 到 1 就不动了。 */
+    const period = drawW * 2;                      // 镜像平铺的周期
+    const speed = cfg.scrollUnitsPerSec ?? 0;
+    let off = 0;
+    if (p >= 1 && speed > 0) {
+      off = ((elapsed - dur) * speed) % period;
+      if (off < 0) off += period;
+    }
+    const first = Math.floor((box.minX - off) / drawW);
+    const last = Math.floor((box.maxX - off) / drawW);
+    for (let k = first; k <= last; k++) {
+      const x = k * drawW + off;
+      /* 奇数格水平翻转 —— 这样每一道接缝两边的像素都是同一条边，天然无缝 */
+      const mirrored = (((k % 2) + 2) % 2) === 1;
+      if (mirrored) {
+        ctx.save();
+        ctx.translate(x + drawW, box.minY);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, 0, 0, drawW, drawH);
+        ctx.restore();
+      } else {
+        ctx.drawImage(img, x, box.minY, drawW, drawH);
       }
-      for (let px = w; px >= 0; px -= 24) {
-        const yy = yBase + amp * 2.1 + Math.sin((px / w) * 5 + t * 1.3 + i) * amp;
-        ctx.lineTo(box.minX + px, yy);
+    }
+    ctx.restore();   // 解除"气浪圆"裁剪
+
+    /* ③ 气浪环本身：画在领域层之上，随展开变淡，铺满即消失。
+       放在圆裁剪**外面**，否则环会被自己的圆裁掉一半。 */
+    if (p < 1) {
+      const fade = Math.min(1, p / 0.05);          // 起步极快淡入，免得第一帧是个点
+      const ringA = (cfg.ringAlpha ?? 0.85) * fade * Math.pow(1 - p, 0.8);
+      if (ringA > 0.01) {
+        ctx.globalAlpha = ringA;
+        ctx.strokeStyle = cfg.glow || '#7dd3fc';
+        ctx.lineWidth = cfg.ringWidth ?? 30;
+        ctx.beginPath();
+        ctx.arc(cx, cy, waveR, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = ringA * (cfg.ringCoreAlpha ?? 0.95);
+        ctx.strokeStyle = cfg.core || '#ffffff';
+        ctx.lineWidth = 3;
+        ctx.stroke();
       }
-      ctx.closePath();
-      ctx.fill();
     }
     ctx.globalAlpha = 1;
     ctx.restore();
+  }
+
+  /** 把裁剪区域设成"场地形状"。
+   *  领域层必须裁到场地里 —— 只按外接矩形裁的话，圆形/多边形场地外面
+   *  也会糊上一层极光，看起来像画到画布外面去了。 */
+  _arenaClip(ctx, shape) {
+    const s = shape || this.arenaShape;
+    ctx.beginPath();
+    if (!s) { ctx.rect(0, 0, WORLD_W, WORLD_H); }
+    else if (s.type === 'circle') { ctx.arc(s.cx, s.cy, s.r, 0, Math.PI * 2); }
+    else {
+      const pts = s.points;
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath();
+    }
+    ctx.clip();
   }
 
   /* ---------- 事件特效 ---------- */
@@ -699,7 +838,8 @@ export class Renderer {
     }
   }
 
-  /* ---------- 弹道 ----------
+
+/* ---------- 弹道 ----------
      数据来自快照（不是事件），所以暂停时会停在原地、回放会跟着倒回去。 */
   _projectiles(ctx, battle, snap) {
     const pj = snap && snap.proj;
@@ -709,11 +849,18 @@ export class Renderer {
       const x = pj[i], y = pj[i + 1], r = pj[i + 2];
       const lifeT = pj[i + 3];                 // 1 → 0
       const color = pal[pj[i + 4]] || '#7dd3fc';
-      const ptype = pj[i + 5];                 // 0 特效 / 1 实体 / 2 光束
+      const ptype = pj[i + 5];                 // 0 特效 / 1 实体 / 2 光束 / 3 锚定光柱
       const isBeam = ptype > 1.5;
+      /* 锚定光柱（公主传承3）：从锚点**向前**画，长度由弹道自己带着。
+         普通激光是"头部 + 身后拖影"，方向正好相反。 */
+      const beamFwd = ptype > 2.5;
+      const beamLen = pj[i + 10] || 0;
       const isBody = !isBeam && ptype > 0.5;
       const w = pj[i + 6] || r * 2;
       const dirX = pj[i + 7], dirY = pj[i + 8];
+      const sprIdx = pj[i + 9];
+      const spr = (sprIdx >= 0 && battle.projSpritePalette)
+        ? battle.projSpritePalette[sprIdx] : null;
 
       ctx.save();
       /* 接近寿命尽头时淡出，避免"啪"地凭空消失。
@@ -721,31 +868,62 @@ export class Renderer {
       const fade = lifeT < 0.25 ? lifeT / 0.25 : 1;
       const core = fade * (isBody ? 1 : 0.75);
 
+      /* 贴图弹道（箭矢）：有图就直接按飞行方向转着画，
+         不再画程序化的光点。这样"搭在弓上的箭"和"飞出去的箭"
+         是同一张图，撒放那一瞬间接得上。 */
+      if (spr && spr.src) {
+        const st = getSticker(spr.src);
+        if (st && st.ready && !st.failed) {
+          const iw = st.img.naturalWidth || st.img.width;
+          const ih = st.img.naturalHeight || st.img.height;
+          const len = spr.len > 0 ? spr.len : r * 6;
+          const hgt = len * (ih / iw);
+          ctx.globalAlpha = fade;
+          ctx.translate(x, y);
+          ctx.rotate(Math.atan2(dirY, dirX));
+          /* 箭图的中心对准弹道中心（碰撞按圆算，所以图要居中才不偏） */
+          ctx.drawImage(st.img, -len / 2, -hgt / 2, len, hgt);
+          ctx.restore();
+          continue;
+        }
+      }
+
       /* 光束（激光）：画成一根**圆柱体光柱**，而不是渐隐的拖尾。
          圆柱体的特征是"等宽、两端有明确边界"：
          外面一层柔光外壳，中间实心光柱，中心一条更亮的核心线，
          前端补一个半圆头 —— 这样它看起来是一截"打出去的光"，
          和其他圆点状弹道一眼就能分开。 */
       if (isBeam && (dirX || dirY)) {
-        const L = Math.max(40, w * 3);
+        /* 长度优先用弹道自带的 beamLen —— 判定用的也是同一个数，
+           所以"画多长"就等于"打多长"。没有才退回按宽度估的旧行为。 */
+        const L = beamLen > 0 ? beamLen : Math.max(40, w * 3);
+        /* 向前画的光柱从锚点出发往 +X 铺；普通激光从头部往 -X 铺拖影 */
+        const x0 = beamFwd ? 0 : -L;
+        const x1 = beamFwd ? L : 0;
+        /* 光柱本体的不透明度 = fade（寿命末端的淡出）× BEAM_ALPHA。
+           其余两层按比例跟着它走，所以调 BEAM_ALPHA 一处就够。 */
+        const beamA = fade * BEAM_ALPHA;
         ctx.save();
+        /* 先按场地裁剪（此时还在世界坐标系里），再进局部变换 ——
+           否则 clip 会拿到"旋转过的场地路径"，裁出来的形状是错的。 */
+        this._arenaClip(ctx, this._frameShape);
         ctx.translate(x, y);
         ctx.rotate(Math.atan2(dirY, dirX));
         // 外层柔光（圆柱外壳）
-        ctx.globalAlpha = core * 0.28;
+        ctx.globalAlpha = beamA * BEAM_GLOW;
         ctx.fillStyle = color;
-        ctx.fillRect(-L, -w / 2 - 2.5, L, w + 5);
+        ctx.fillRect(x0, -w / 2 - 2.5, x1 - x0, w + 5);
         // 柱体
-        ctx.globalAlpha = core;
-        ctx.fillRect(-L, -w / 2, L, w);
-        // 前端圆头（让它不是被切断的方块）
+        ctx.globalAlpha = beamA;
+        ctx.fillRect(x0, -w / 2, x1 - x0, w);
+        // 圆头一律补在**远离锚点的那一端**（普通激光是头部、光柱是末端）
         ctx.beginPath();
-        ctx.arc(0, 0, w / 2, -Math.PI / 2, Math.PI / 2);
+        ctx.arc(beamFwd ? x1 : 0, 0, w / 2, -Math.PI / 2, Math.PI / 2);
         ctx.fill();
         // 中心高亮核心线
-        ctx.globalAlpha = core * 0.95;
+        ctx.globalAlpha = beamA * BEAM_CORE;
         ctx.fillStyle = '#ffffff';
-        ctx.fillRect(-L, -w * 0.16, L, w * 0.32);
+        ctx.fillRect(x0, -w * 0.16, x1 - x0, w * 0.32);
         ctx.restore();
         ctx.globalAlpha = core;
       } else {
@@ -783,6 +961,82 @@ export class Renderer {
   }
 
   /* ---------- 小球本体 ---------- */
+  /* ------------------------------------------------------------
+     手持物件：弓（动作动画的载体）
+
+     为什么必须和球体分开画 —— 三个约束在这里同时解开：
+       1. 球体贴图走的是 ctx.clip() 圆形裁剪，
+          弓画在球外面会被整条裁掉，所以这里**不 clip**；
+       2. 球装陀螺时 `spin` 会让 ctx.rotate 整个贴图，
+          弓如果画在同一个变换里就会跟着翻滚、没法瞄准。
+          这里**不套那个 rotate**，弓天然只按 aimAngle 转 → 冲突自动消失；
+       3. 弓的朝向来自快照的 aimAngle（朝最近敌人），
+          而球体贴图的旋转来自 spinAngle（陀螺层数），两者本来就是两回事。
+
+     绘制顺序：本函数在**画球之前**调用，于是球会盖住弓的握把内侧，
+     看起来像"球握着弓"，而不是"弓贴在球上"。
+     ------------------------------------------------------------ */
+  _bow(ctx, u, x, y, r, castP, aimAngle, castKind) {
+    const bow = u.bow;
+    if (!bow) return;
+    const src = bowStateSrc(bow, castP);
+    if (!src) return;
+    const st = getSticker(src);
+    if (!st || !st.ready || st.failed) return;   // 没加载好就干脆不画，别画个方块
+
+    const iw = st.img.naturalWidth || st.img.width;
+    const ih = st.img.naturalHeight || st.img.height;
+    /* 单位注意：_units 里的 x / y / r 全是**世界单位**（快照已经除过 SCALE），
+       画布的整体缩放由外层 transform 负责，所以这里不能乘 SCALE。 */
+    const drawH = bow.bowH;
+    const drawW = drawH * (iw / ih);             // 宽度按原图比例，绝不拉伸
+    const axF = bow.anchor.x, ayF = bow.anchor.y;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(((aimAngle ?? 0) * Math.PI) / 180);   // 0° = 朝 +X
+    /* 把图片的**锚点**摆到球心：锚点在这块画布上的位置就是球心的位置。
+       两张弓帧（平时 / 拉弓）已由 make-bow-sprites.mjs 对齐到同一块画布，
+       所以这里换图不会让弓横跳 —— 原始两张图的画布宽度差 40px。 */
+    ctx.drawImage(st.img, -axF * drawW, -ayF * drawH, drawW, drawH);
+
+    /* 五连发：在同一个搭箭节点上，扇形额外排布 4 根箭矢。
+       这些箭是**武器的一部分**（不是已经射出去的弹道），
+       所以写在弓的局部坐标系里 —— 跟着弓一起转，也就不受陀螺自转影响。
+       画在弓图之上、球之下：球仍然盖住握把内侧。 */
+    if (castKind === 1 && castP > 0 && castP < 0.999 && bow.burst && bow.arrow) {
+      const at = getSticker(bow.arrow);
+      if (at && at.ready && !at.failed) {
+        const aw = at.img.naturalWidth || at.img.width;
+        const ah = at.img.naturalHeight || at.img.height;
+        const aLen = (bow.arrowLenFrac ?? 0.335) * drawH;
+        const aH = aLen * (ah / aw);
+        /* 搭箭节点在画布上的位置 → 相对球心的局部坐标 */
+        const nlx = (bow.nock.x - axF) * drawW;
+        const nly = (bow.nock.y - ayF) * drawH;
+        const n = bow.burst.count;
+        const spread = (bow.burst.spreadDeg * Math.PI) / 180;
+        for (let k = 0; k < n; k++) {
+          /* 与 skills.js 里五连发**同一个公式**：
+             把 k 在 (0..n-1) 上映射到 [-1,1]，再乘张角的一半。
+             这样画出来的扇形与箭真正飞出去的方向逐根对齐。 */
+          const off = (n === 1) ? 0 : ((k / (n - 1)) * 2 - 1) * spread;
+          /* 正中那一根（off = 0）已经画在 draw 图里了，这里跳过，
+             否则会和图上那支箭叠成两支。 */
+          if (Math.abs(off) < 1e-9) continue;
+          ctx.save();
+          ctx.translate(nlx, nly);
+          ctx.rotate(off);
+          /* 箭图的左边缘中点 = 箭尾，所以画在 (0, -aH/2) ——
+             五根箭共用同一个箭尾，扇形从这里散开。 */
+          ctx.drawImage(at.img, 0, -aH / 2, aLen, aH);
+          ctx.restore();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
   _units(ctx, battle, snap, opts) {
     const d = snap.data;
     /* 用快照实际长度反推单位数，而不是 battle.units.length：
@@ -801,10 +1055,26 @@ export class Renderer {
       const stealth = d[o + 10] > 0.5;
       const bloomed = d[o + 11] > 0.5;
       const spin = d[o + 12] || 0;      // 旋转角（陀螺叠层驱动），暂停回放时会冻住
+      const castP = d[o + 13] || 0;     // 施法进度 0~1（拉弓动作的时间基准）
+      const aimAngle = d[o + 14] || 0;  // 瞄准角（角度制，朝最近的敌人）
+      const castKind = d[o + 15] || 0;  // 施法变体：0 普通 / 1 五连发
       const r = u.r / SCALE;
       const tc = teamColor(u.team);
 
       ctx.save();
+
+      /* 时间停止（公主传承1）：除豁免者外全场褪色。
+         放在这个 save 之后 —— 血条、队伍环、贴图会一起褪，
+         否则会出现"球灰了但血条还是彩色的"这种半吊子效果。 */
+      const tsOwner = snap.ts ?? -1;
+      if (tsOwner >= 0 && i !== tsOwner) {
+        ctx.filter = 'grayscale(1) brightness(0.55)';
+      }
+
+      /* 手持物件（弓）：先画，让球盖住握把内侧。
+         放在所有球体装饰之前 —— 弓是"身体的一部分"，
+         不该压在血条、闪光、隐身轮廓上面。 */
+      this._bow(ctx, u, x, y, r, castP, aimAngle, castKind);
 
       /* 开华的极光形态：脚下一圈缓慢旋转的光晕，说明"这个球已经强化过了" */
       if (bloomed) {

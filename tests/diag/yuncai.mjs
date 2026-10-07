@@ -32,6 +32,24 @@ function mk(skills, opts = {}) {
 }
 
 const evCount = (b, t) => b.events.filter(e => e.type === t).length;
+
+/** 造一枚测试用弹道。
+ *  **必须走引擎自己的 _spawnProjectile**，不要手搓对象字面量：
+ *  手搓的那份字段表和工厂会漂移 —— 引擎加了新字段（比如 fedLines），
+ *  手搓的没有，于是 _updateFields 里读它就整个崩掉。
+ *  实测就是这么崩的：三条断言全挂在同一个"字段表过期"上。
+ *  走工厂就永远同步。 */
+function probeProj(b, owner, x, y, over = {}) {
+  return b._spawnProjectile({
+    kind: 'aura', tag: 'probe', owner,
+    x, y, vx: 0, vy: 0,
+    damage: 0,
+    radius: 6 * SCALE,
+    width: 12, life: 1, color: '#fff',
+    traits: ['light'],
+    ...over,
+  });
+}
 const hitsOf = (b, kind) => b.events.filter(e => e.type === 'hit' && e.kind === kind);
 
 /* 进度标记走 stderr：重定向到文件时 stdout 是带缓冲的，
@@ -156,23 +174,13 @@ console.log('\n【①】裁光');
 
   /* 吸收一次"光" → 深紫（2/帧） */
   const owner = b3.units[1];   // 敌方
-  b3.projectiles.push({
-    id: 9999, kind: 'aura', tag: 'test', owner: owner.id, team: owner.team,
-    x: Math.round((B3.x) * 1), y: B3.y, vx: 0, vy: 0, damage: 0,
-    r: 6 * SCALE, w: 12, life: 1, maxLife: 1, color: '#fff',
-    traits: ['light'], bounces: 0, hitsLeft: 1, onHit: null, onExpire: null, alive: true,
-  });
+  probeProj(b3, owner, B3.x, B3.y);
   b3.step();
   check('细线吸收"光"后进阶到深紫', line.stage === 1, `stage=${line.stage}`);
   check('吸收会消耗掉那枚"光"', evCount(b3, 'lineAbsorb') === 1);
 
   /* 再吸收一次 → 微光，接下来敌方触碰就爆炸 */
-  b3.projectiles.push({
-    id: 9998, kind: 'aura', tag: 'test', owner: owner.id, team: owner.team,
-    x: B3.x, y: B3.y, vx: 0, vy: 0, damage: 0,
-    r: 6 * SCALE, w: 12, life: 1, maxLife: 1, color: '#fff',
-    traits: ['light'], bounces: 0, hitsLeft: 1, onHit: null, onExpire: null, alive: true,
-  });
+  probeProj(b3, owner, B3.x, B3.y);
   b3.step();
   check('第二次吸收后进入微光阶段', line.stage === 2, `stage=${line.stage}`);
 
@@ -308,14 +316,59 @@ console.log('\n【②】魔弹');
   check(`激光伤害为 ${P.laserDmg}`, laserShot && laserShot.value === P.laserDmg,
     laserShot ? String(laserShot.value) : '没发出');
   const lp = b3.projectiles[b3.projectiles.length - 1];
-  check('激光速度 1000', lp && Math.abs(Math.hypot(lp.vx, lp.vy) / SCALE - P.laserSpeed) < 1,
-    lp ? String(Math.round(Math.hypot(lp.vx, lp.vy) / SCALE)) : '-');
-  check(`激光粗细为 ${P.laserWidth}（判定半径 = 宽度的一半，与画面一致）`,
-    lp && Math.abs(lp.w - P.laserWidth) < 0.01 && Math.abs(lp.r / SCALE - P.laserWidth / 2) < 0.01,
-    lp ? `宽 ${lp.w} / 判定半径 ${lp.r / SCALE}` : '-');
-  check('激光带"光"特质', lp && lp.traits.includes('light'));
-  check('激光发射后计数归零', A3.flags.modanHits === 0, String(A3.flags.modanHits));
-  check('激光会穿透目标', lp && lp.pierce === true, lp ? String(lp.pierce) : '-');
+  /* 第三发的规格（作者 2026-10 改版）：
+     形态同缇娜的「公主传承3」—— 锚在施法者身上、向前画的圆柱、贯穿战场；
+     但只持续半秒、**不跟随目标**（方向定死）、**每个目标只结算一次**。 */
+  check(`光柱的宽度为 ${P.laserWidth}（判定半宽与画面共用这个数）`,
+    lp && Math.abs(lp.w - P.laserWidth) < 0.01,
+    lp ? `宽 ${lp.w}` : '-');
+  check('光柱一端钉在晕彩身上（anchor = 施法者）',
+    lp && lp.anchor === A3.id, lp ? `anchor=${lp.anchor}` : '-');
+  check('光柱**不跟随目标**（没有 anchorTarget，方向发射即定死）',
+    lp && lp.anchorTarget === -1, lp ? `anchorTarget=${lp.anchorTarget}` : '-');
+  check('光柱向前画（beamForward，不是普通激光那种向后拖影）',
+    lp && lp.beamForward === true);
+  check(`光柱长度 ${P.laserLen} ≥ 最长场地对角线（贯穿战场）`,
+    lp && lp.beamLen === P.laserLen && P.laserLen >= 1266,
+    lp ? `beamLen=${lp.beamLen}` : '-');
+  check(`只持续 ${P.laserLife} 秒`, lp && Math.abs(lp.life - P.laserLife) < 1e-9,
+    lp ? String(lp.life) : '-');
+  check('每个目标只结算一次（sweepOnce，不是按节拍反复掉血）',
+    lp && lp.sweepOnce === true);
+  check('命中不走"贴到就爆"的弹体判定（否则它会在晕彩身边自爆）',
+    lp && lp.noBodyHit === true);
+  check('带"光"特质', lp && lp.traits.includes('light'));
+  check('光柱发射后计数归零', A3.flags.modanHits === 0, String(A3.flags.modanHits));
+  /* 作者要求：碰到裁光的细线**不会消失**，但依然提供"光" */
+  check('光柱不会被细线吃掉（absorbable = false）',
+    lp && lp.absorbable === false, lp ? String(lp.absorbable) : '-');
+
+  /* "不跟随目标"要**按行为测**，不能只查字段：
+     anchorTarget = -1 只说明没挂追踪参数，万一别处又给它转了向就漏了。
+     做法：记下发射瞬间的方向，然后把目标挪到一个完全不同的角度，再推进几帧 ——
+     方向必须一点没变；同时位置要跟着晕彩（那才是"锚定"）。 */
+  {
+    const b6 = mk(['yuncai_modan']);
+    const A6 = b6.units[0], B6 = b6.units[1];
+    /* 注意**不能**清空 skills —— _runSkills 遍历的就是它，清了就一枪都不放。
+       （前面"穿透实战"那段清空是对的，因为那道光是我手工 spawn 的。） */
+    A6.flags.modanHits = P.hitsToLaser;
+    A6.skillCd = {};
+    b6._runSkills(A6, 'cooldown');
+    const beam6 = b6.projectiles[b6.projectiles.length - 1];
+    const dir0 = Math.atan2(beam6.vy, beam6.vx);
+    /* 把敌人挪到晕彩正上方（与原方向差 90°），并让它站着不动 */
+    B6.x = A6.x; B6.y = A6.y - Math.round(300 * SCALE);
+    B6.vx = 0; B6.vy = 0;
+    for (let i = 0; i < 10 && !b6.over; i++) b6.step();
+    const dir1 = beam6.alive ? Math.atan2(beam6.vy, beam6.vx) : null;
+    check('光柱的方向发射后一点不变（真的不跟随目标）',
+      dir1 !== null && Math.abs(dir1 - dir0) < 1e-9,
+      dir1 === null ? '光柱没了' : `${(dir0 * 180 / Math.PI).toFixed(2)}° → ${(dir1 * 180 / Math.PI).toFixed(2)}°`);
+    check('光柱的位置跟着晕彩走（锚定，不是钉在原地）',
+      beam6.x === A6.x && beam6.y === A6.y,
+      `光柱(${(beam6.x / SCALE).toFixed(0)},${(beam6.y / SCALE).toFixed(0)}) 晕彩(${(A6.x / SCALE).toFixed(0)},${(A6.y / SCALE).toFixed(0)})`);
+  }
 
   /* 穿透实战：让激光横穿整排敌人，每个都该挨一次 */
   {
@@ -338,13 +391,15 @@ console.log('\n【②】魔弹');
     A.vx = 0; A.vy = 0;
     A.skills = [];
     const hp0 = [1, 2, 3].map(k => bp.units[k].hp);
+    /* 与技能里发出来的那道**同一种**弹道（锚定、向前、贯穿、一趟只打一下） */
     bp._spawnProjectile({
       kind: 'aura', tag: 'laser', owner: A,
       x: A.x, y: A.y,
       vx: 1000 * SCALE, vy: 0,
-      damage: P.laserDmg, radius: Math.round(P.laserWidth / 2 * SCALE),
-      width: P.laserWidth, beam: true, pierce: true,
-      life: 3, color: '#e9d5ff', traits: ['light'],
+      damage: P.laserDmg, radius: Math.round(2 * SCALE),
+      width: P.laserWidth, beam: true, beamForward: true, beamLen: P.laserLen,
+      anchor: A.id, noBodyHit: true, sweepOnce: true, absorbable: false,
+      life: P.laserLife, color: '#e9d5ff', traits: ['light'],
     });
     for (let i = 0; i < 60; i++) bp.step();
     const hurt = [1, 2, 3].filter((k, i) => bp.units[k].hp < hp0[i]).length;
@@ -352,6 +407,49 @@ console.log('\n【②】魔弹');
     const hitsPer = [1, 2, 3].map((k, i) => hp0[i] - bp.units[k].hp);
     check('每个目标只吃一次激光伤害（不会反复结算）',
       hitsPer.every(v => v === P.laserDmg || v === 0), hitsPer.join(','));
+  }
+
+  /* ---------- 光柱碰到裁光的细线：不消失，但依然提供"光" ---------- */
+  {
+    const bl = mk(['yuncai_modan', 'yuncai_caiguang']);
+    const AL = bl.units[0], BL = bl.units[1];
+    /* 清掉技能，避免它自己的魔弹/裁光掺进来；我们手工发一道朝右的贯穿光柱 */
+    const keep = bl.arena;
+    AL.skills = [];
+    BL.skills = [];
+    BL.x = AL.x + Math.round(600 * SCALE);
+    BL.y = AL.y;
+    /* 在光柱的路上横一条细线（竖着的，正好被横光柱穿过） */
+    const lx = AL.x + Math.round(200 * SCALE);
+    const line = bl._spawnField({
+      kind: 'line', owner: AL,
+      x: lx, y: AL.y - 60 * SCALE, x2: lx, y2: AL.y + 60 * SCALE,
+      halfW: YUNCAI.caiguang.lineHalfW,
+      damageByStage: YUNCAI.caiguang.dmgByStage,
+      boomDamage: YUNCAI.caiguang.boom,
+    });
+    const stage0 = line.stage;
+    const beam = bl._spawnProjectile({
+      kind: 'aura', tag: 'laser', owner: AL,
+      x: AL.x, y: AL.y, vx: 1000 * SCALE, vy: 0,
+      damage: P.laserDmg, radius: Math.round(2 * SCALE),
+      width: P.laserWidth, beam: true, beamForward: true, beamLen: P.laserLen,
+      anchor: AL.id, noBodyHit: true, sweepOnce: true, absorbable: false,
+      life: P.laserLife, color: '#e9d5ff', traits: ['light'],
+    });
+    const target = bl.projectiles[bl.projectiles.length - 1];
+    /* 推进帧数按时长算，别写死 —— 光柱寿命改成 0.5 秒之后，
+       原来推 30 帧正好推到它到期的时刻，"不会消失"会假红。 */
+    const holdFrames = Math.floor((P.laserLife / (1 / 60)) * 0.67);
+    for (let i = 0; i < holdFrames && !bl.over; i++) bl.step();
+    check(`光柱碰到细线**不会消失**（${P.laserLife} 秒里一直都在）`,
+      !!target && target.alive, target ? (target.alive ? '还在' : '没了') : '找不到');
+    check('细线照样进阶了（光柱提供了"光"）',
+      line.stage > stage0, `stage ${stage0} → ${line.stage}`);
+    /* 每条细线只喂一次：光柱会在线上停一会儿，逐帧都喂的话细线瞬间满级 */
+    check('同一条细线只喂一次（不会逐帧顶到满级）',
+      line.absorb === 1, `absorb=${line.absorb}`);
+    void keep;
   }
 
   /* 魔弹被裁光的细线吸收，也要算一次命中计数 */
@@ -441,12 +539,7 @@ console.log('\n【③】折光');
   const A3 = b3.units[0];
   A3.stealthFrames = 60;
   const hp3 = A3.hp;
-  b3.projectiles.push({
-    id: 1, kind: 'aura', tag: 't', owner: b3.units[1].id, team: 1,
-    x: A3.x, y: A3.y, vx: 0, vy: 0, damage: 40,
-    r: 6 * SCALE, w: 12, life: 1, maxLife: 1, color: '#fff',
-    traits: [], bounces: 0, hitsLeft: 1, onHit: null, onExpire: null, alive: true,
-  });
+  probeProj(b3, b3.units[1], A3.x, A3.y, { damage: 40, traits: [] });
   b3.step();
   check('隐身不挡弹道（只挡近战）', A3.hp < hp3, `掉了 ${hp3 - A3.hp} 点`);
 

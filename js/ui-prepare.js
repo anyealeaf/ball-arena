@@ -45,6 +45,28 @@ export function renderPrepare(root, onStart) {
   while (state.loadouts.length < MAX_TEAMS) state.loadouts.push([]);
   if (typeof state.sizeScale !== 'number' || !isFinite(state.sizeScale)) state.sizeScale = 0.5;
 
+  /* ---------- 一次性迁移：把"被固化的空装配"还原成"跟随默认" ----------
+     背景：缇娜刚注册时技能表是空的（为了让球先进场试手感），
+     defaultSkillsFor('tina') 当时返回空数组，而 ensureSpecies 会把默认
+     **固化**成具体数组写进存档。补上 7 个技能之后，存档里那个空数组依然生效 ——
+     表现为"缇娜什么技能都不放"，玩家看到的就是"她的技能全都没有特效"。
+
+     只做一次（记在 state.migrations 里）。为什么必须记：
+     迁移完成后用户仍然可以**主动**清空某个球的技能（那是合法选择，存空数组），
+     若每次加载都无条件还原，就会把用户的选择反复抹掉。 */
+  const LOADOUT_DEFAULTS_MIGRATION = 2;
+  if (((state.migrations || {}).loadoutDefaults || 0) < LOADOUT_DEFAULTS_MIGRATION) {
+    let touched = 0;
+    for (const lo of state.loadouts) {
+      if (!Array.isArray(lo)) continue;
+      for (let i = 0; i < lo.length; i++) {
+        if (Array.isArray(lo[i]) && lo[i].length === 0) { lo[i] = null; touched++; }
+      }
+    }
+    state.migrations = { ...(state.migrations || {}), loadoutDefaults: LOADOUT_DEFAULTS_MIGRATION };
+    if (touched) save();
+  }
+
   /* 球种列表与技能装配必须始终一一对应。
      旧存档只有 species、没有 loadouts，所以这里统一在 ensureSpecies 里补齐：
      缺的那一格就按该球种的默认装配填（前 MAX_SKILLS_PER_UNIT 个）。 */
@@ -61,11 +83,24 @@ export function renderPrepare(root, onStart) {
     while (arr.length < n) arr.push(DEFAULT_SPECIES_ID);
     arr.length = n;
     while (lo.length < n) lo.push(null);      // null = 用默认装配
+    /* **不要把默认固化进存档**（lo[i] 保持 null）。
+       踩过：以前这里写的是"缺省就填 defaultSkillsFor(...)"，
+       于是"跟随默认"变成了"写死成当前默认"。后果是**改了默认装配对老存档不生效** ——
+       缇娜那次正好赶上：注册时默认是空数组，被写死成空数组，
+       后来补了 7 个技能，老存档里那格还是空的，玩家看到的就是"技能全都没特效"。
+       现在 null 一路保持到读取端，由 equippedOf() 现算。 */
     for (let i = 0; i < n; i++) {
-      if (lo[i] === null || lo[i] === undefined) lo[i] = defaultSkillsFor(arr[i]);
-      else lo[i] = normalizeSkills(arr[i], lo[i]);
+      if (lo[i] !== null && lo[i] !== undefined) lo[i] = normalizeSkills(arr[i], lo[i]);
     }
     lo.length = n;
+  }
+
+  /* 取某个格子里**实际生效**的装配：
+     null / undefined = 跟随该球种当前的默认装配（现算，不读存档里的旧值）。 */
+  function equippedOf(t, i) {
+    const raw = state.loadouts[t] && state.loadouts[t][i];
+    if (raw === null || raw === undefined) return defaultSkillsFor(state.species[t][i]);
+    return normalizeSkills(state.species[t][i], raw);
   }
   for (let t = 0; t < MAX_TEAMS; t++) ensureSpecies(t, state.teamSizes[t]);
 
@@ -301,7 +336,7 @@ export function renderPrepare(root, onStart) {
     const speciesId = state.species[t][i];
     const sp = SPECIES_BY_ID[speciesId];
     const owned = sp.skills || [];
-    const equipped = state.loadouts[t][i] || [];
+    const equipped = equippedOf(t, i);
     const useDetail = getSkillDetail();   // 简要 / 详细：与图鉴共用一份偏好
     const key = t + ':' + i;
 
@@ -325,7 +360,8 @@ export function renderPrepare(root, onStart) {
       state.species[t][i] = e.target.value;
       /* 换球种后，旧装配里可能有新球种没有的技能 —— 整格回落到新球种的默认装配。
          这比"尽量保留"更可预测：玩家换球种时看到的就是一套完整的新配置。 */
-      state.loadouts[t][i] = defaultSkillsFor(e.target.value);
+      /* 换球种：整格回落到"跟随新球种的默认"，而不是把当前默认写死 */
+    state.loadouts[t][i] = null;
       save(); drawTeams(); drawSummary();
     };
     const btn = row.querySelector('.skill-btn');
@@ -384,7 +420,7 @@ export function renderPrepare(root, onStart) {
       panel.querySelectorAll('input[data-skill]').forEach(cb => {
         cb.onchange = () => {
           const id = cb.dataset.skill;
-          const cur = state.loadouts[t][i] || [];
+          const cur = equippedOf(t, i);
           if (cb.checked) {
             if (cur.includes(id)) return;
             if (cur.length >= MAX_SKILLS_PER_UNIT) { cb.checked = false; return; }  // 双保险
@@ -761,7 +797,7 @@ export function renderPrepare(root, onStart) {
     let skillCount = 0, unitWithSkills = 0;
     for (let t = 0; t < state.teamCount; t++) {
       for (let i = 0; i < state.teamSizes[t]; i++) {
-        const n = (state.loadouts[t][i] || []).length;
+        const n = equippedOf(t, i).length;
         skillCount += n;
         if (n) unitWithSkills++;
       }
@@ -788,7 +824,9 @@ export function renderPrepare(root, onStart) {
       for (let i = 0; i < state.teamSizes[t]; i++) {
         units.push({
           slot: slotBase + i,
-          stats: makeUnitStats(state.species[t][i], state.loadouts[t][i])
+          /* 直接把 raw 值传下去：null 会被 makeUnitStats → normalizeSkills 解析成默认装配。
+         不要在这里传 equippedOf(t,i) —— 那会把默认又固化进战斗配置。 */
+      stats: makeUnitStats(state.species[t][i], state.loadouts[t][i])
         });
       }
       teams.push({ units });
