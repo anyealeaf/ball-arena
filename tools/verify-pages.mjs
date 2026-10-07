@@ -22,11 +22,13 @@ const bust = () => `?v=${Date.now()}`;
 /* 新鲜度抽查要读本地的 js/balls.js 来现取球种清单（见文件末尾） */
 import fs from 'node:fs/promises';
 
-/* 要抽查的资源：入口、引擎、音效、技能表、样式，以及每个角色的贴图。
-   贴图必须验 —— 它最容易因为路径大小写或漏传而 404，
-   而 404 页面也是 200 之外最常见的坑（这里靠 content-type 判定）。
-   **每加一个角色就要在这里加一行**：漏加不会报错，
-   只会让"新角色线上没有贴图"这件事一直没人发现。 */
+/* 要抽查的资源：入口、引擎、音效、技能表、样式、文档。
+   角色贴图**不写在这里** —— 它们由下面的 `characterAssets` 从本地球种表自动取。
+   为什么要自动取：贴图最容易因为路径大小写或漏传而 404，
+   而 404 页面也是 200 之外最常见的坑（靠 content-type 判定）。
+   写死清单的话，每加一个角色都要记得回来加一行 —— **我自己就忘过**：
+   加缇娜时补了球种 id 的检查，贴图那几行漏了。
+   从 balls.js 现取就永远不会漏，也不需要谁记得。 */
 const CHECKS = [
   ['index.html', 'text/html', 'HTML 入口'],
   ['js/main.js', 'javascript', '入口脚本'],
@@ -34,11 +36,34 @@ const CHECKS = [
   ['js/skills.js', 'javascript', '技能表'],
   ['js/audio.js', 'javascript', '音效模块'],
   ['css/styles.css', 'css', '样式'],
-  ['assets/characters/yuncai_ball.png', 'image/', '晕彩贴图'],
-  ['assets/characters/yuncai_ball_bloom.png', 'image/', '开华贴图'],
-  ['assets/characters/taoyao_ball.png', 'image/', '桃夭贴图'],
   ['README.md', '', '说明文档'],
 ];
+
+/* 每个球种用到的所有贴图。
+   **不逐个字段去取**（src / frames / idle / draw / arrow …），而是把球种配置
+   整棵对象扫一遍，凡是"看起来像图片路径"的字符串都算 —— 字段名各角色不一样
+   （桃夭的弓用 idle/draw/arrow 而不是 src），按名字取一定会漏。 */
+const IMG_RE = /\.(png|jpe?g|webp|gif)$/i;
+const characterAssets = new Map();
+function collect(sp, node, path) {
+  if (!node) return;
+  if (typeof node === 'string') {
+    if (IMG_RE.test(node)) characterAssets.set(node, `${sp.name}·${path}`);
+    return;
+  }
+  if (Array.isArray(node)) { node.forEach((v, i) => collect(sp, v, `${path}[${i}]`)); return; }
+  if (typeof node === 'object') {
+    for (const k of Object.keys(node)) collect(sp, node[k], path ? `${path}.${k}` : k);
+  }
+}
+try {
+  const { SPECIES } = await import('../js/balls.js');
+  for (const sp of SPECIES) collect(sp, sp, '');
+} catch (e) {
+  console.error(`✘ 读不到球种表，无法自动列出贴图：${e.message}`);
+  process.exit(1);
+}
+for (const [src, label] of characterAssets) CHECKS.push([src, 'image/', label]);
 
 console.log(`验证站点: ${BASE}\n`);
 let bad = 0;
