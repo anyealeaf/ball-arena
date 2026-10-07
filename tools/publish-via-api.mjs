@@ -327,7 +327,10 @@ if (parentSha) {
    5) 回读确认（手册：提交后要回读 sha 与文件数，别只看脚本退出码）
    --------------------------------------------------------------------------- */
 const after = await api('GET', refPath);
-const remoteTree = await api('GET', `${API}/git/trees/${after.object.tree.sha}?recursive=1`);
+/* 注意：ref 对象上是 .object.sha（**提交**的 sha），不是 .object.tree.sha。
+   要数文件得先拿提交、再从提交取 tree。（第一版就在这里写错，白崩了一次。） */
+const remoteCommit = await api('GET', `${API}/git/commits/${after.object.sha}`);
+const remoteTree = await api('GET', `${API}/git/trees/${remoteCommit.tree.sha}?recursive=1`);
 const remoteBlobs = (remoteTree.tree || []).filter(t => t.type === 'blob').length;
 console.log('');
 console.log(`回读 ${BRANCH}: ${after.object.sha}`);
