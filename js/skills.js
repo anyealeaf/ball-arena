@@ -600,7 +600,9 @@ export const TAOYAO = {
   /* ① 映霞[荣]：连射 + 五连发 */
   rong: {
     cd: 1, damage: 50, speed: 500, r: 5, life: 1.6, color: '#f9a8d4',
-    knockback: 60,          // 轻微击退
+    /* 击退已按作者要求去掉（原本 60）。
+       引擎的 knockback 原语保留 —— 测试球的定点射击还在用，
+       以后哪个技能要击退，直接在这里加回一个数就行。 */
     burstEvery: 5,          // 射 5 次之后
     burstCount: 5,          // 下一次连发 5 支
     burstDmg: 30,
@@ -620,7 +622,7 @@ export const TAOYAO = {
 
   /* ④ 春景：自我 buff */
   chunjing: {
-    cd: 10, duration: 5, healPerSec: 20,
+    cd: 10, duration: 5, healPerSec: 10,
     cannonEvery: 2.5, cannonDmg: 180, cannonSpeed: 420, cannonR: 7,
     cannonLife: 3, color: '#fbcfe8',
   },
@@ -628,7 +630,9 @@ export const TAOYAO = {
   /* ⑤ 陀螺：被打击叠层 */
   top: {
     maxStacks: 10,
-    healPerSec: 1, meleePer: 2, speedPer: 2,
+    meleePer: 2, speedPer: 2,
+    /* 回血已按作者要求去掉（原本每层 +1 血/秒）。
+       层数现在只驱动"碰撞伤害 / 移速 / 转速"三件事。 */
     /* 每层旋转速度见 core.js 的 SPIN_RATE_PER_STACK */
   },
 };
@@ -684,10 +688,10 @@ export const SKILL_RONG = {
   id: 'taoyao_rong',
   name: '映霞[荣]',
   group: 'yingxia',
-  desc: '每1秒发射一支粉色的箭矢，箭矢移动速度为500，造成50伤害，有轻微的击退效果。' +
+  desc: '每1秒发射一支粉色的箭矢，箭矢移动速度为500，造成50伤害。' +
         '射击五次后，下一次会连续发射5发箭矢，每支伤害降低到30。',
   descDetail: `每 ${TAOYAO.rong.cd} 秒瞄准最近的敌人发射一支粉色箭矢` +
-        `（速度 ${TAOYAO.rong.speed}，伤害 ${TAOYAO.rong.damage}，带轻微击退 ${TAOYAO.rong.knockback}）。` +
+        `（速度 ${TAOYAO.rong.speed}，伤害 ${TAOYAO.rong.damage}，**没有击退**）。` +
         `射出 ${TAOYAO.rong.burstEvery} 支之后，下一轮改为**一次齐射 ${TAOYAO.rong.burstCount} 支**` +
         `（扇形散开，每支伤害降到 ${TAOYAO.rong.burstDmg}），随后重新计数。` +
         `与「映霞[枯]」互斥，两个只能选一个。`,
@@ -801,7 +805,7 @@ export const SKILL_CHUNJING = {
   id: 'taoyao_chunjing',
   name: '春景',
   desc: '每隔10秒对自己施加一次持续5秒的"春景"buff，在buff下，' +
-        '桃夭每秒恢复20点生命值，每2.5秒额外发射一次淡粉色的光炮，光炮伤害为180。',
+        '桃夭每秒恢复10点生命值，每2.5秒额外发射一次淡粉色的光炮，光炮伤害为180。',
   descDetail: `每 ${TAOYAO.chunjing.cd} 秒给自己施加一次「春景」，持续 ${TAOYAO.chunjing.duration} 秒。` +
         `buff 期间：每秒回复 ${TAOYAO.chunjing.healPerSec} 点生命（回复量用余数累积，` +
         `不会因为每帧不足 1 点而回不上血）；` +
@@ -850,20 +854,21 @@ export const SKILL_CHUNJING = {
 };
 
 /* ------------------------------------------------------------
-   ⑤ 陀螺：被"真正的打击"命中时叠层，层数同时驱动四件事
+   ⑤ 陀螺：被"真正的打击"命中时叠层，层数驱动伤害 / 移速 / 转速
    ------------------------------------------------------------ */
 export const SKILL_TOP = {
   id: 'taoyao_top',
   name: '陀螺',
   desc: '被攻击时，桃夭的小球会开始旋转，转速会进行叠加，最多叠加10层。' +
-        '每层会使桃夭每秒回复1的生命值，且使桃夭碰撞伤害提升2点，移动速度提升2点。',
+        '每层会使桃夭碰撞伤害提升2点，移动速度提升2点。',
   descDetail: `被攻击时叠一层，最多 ${TAOYAO.top.maxStacks} 层（被打得越多转得越快）。` +
-        `每层：每秒回复 ${TAOYAO.top.healPerSec} 点生命、碰撞伤害 +${TAOYAO.top.meleePer}、` +
-        `移动速度 +${TAOYAO.top.speedPer}。满层时 +${TAOYAO.top.meleePer * TAOYAO.top.maxStacks} 碰撞伤害、` +
-        `+${TAOYAO.top.speedPer * TAOYAO.top.maxStacks} 移速、每秒回 ${TAOYAO.top.healPerSec * TAOYAO.top.maxStacks} 血。` +
+        `每层：碰撞伤害 +${TAOYAO.top.meleePer}、移动速度 +${TAOYAO.top.speedPer}。` +
+        `满层时 +${TAOYAO.top.meleePer * TAOYAO.top.maxStacks} 碰撞伤害、` +
+        `+${TAOYAO.top.speedPer * TAOYAO.top.maxStacks} 移速。` +
         `注意"被攻击"只算**真正的打击**（近战、弹道、爆炸）——` +
         `裁光质点/细线那种每帧接触伤害、以及场地灼烧都不算，` +
-        `否则一秒 60 次的接触伤害会瞬间把层数顶满。`,
+        `否则一秒 60 次的接触伤害会瞬间把层数顶满。` +
+        `（陀螺**不回血**。）`,
   trigger: { type: 'passive' },
   passive(battle, unit) {
     unit.spinStacks = unit.spinStacks || 0;
@@ -880,10 +885,6 @@ export const SKILL_TOP = {
       battle.refreshSpeed(unit);
       battle._emit('spinUp', unit, null, unit.spinStacks);
     },
-    /* 每帧按层数回血 */
-    onThink(battle, unit) {
-      if (unit.spinStacks > 0) battle._heal(unit, TAOYAO.top.healPerSec * unit.spinStacks * DT);
-    }
   }
 };
 

@@ -123,13 +123,16 @@ console.log('\n【①】映霞[荣]');
     const p = bb.projectiles[bb.projectiles.length - 1];
     return p && Math.abs(Math.hypot(p.vx, p.vy) / SCALE - P.speed) < 1;
   })(), String(P.speed));
-  check('箭矢带轻微击退', (() => {
+  /* 击退已按作者要求去掉。
+     写成**反向断言**（不是删掉这条）：万一以后有人从引擎侧
+     把击退又带回来，这里会立刻变红，而不是安静地多出一个效果。 */
+  check('箭矢没有击退（作者已去掉）', (() => {
     const bb = mk(['taoyao_rong']);
     bb.units[0].skillCd = {};
     bb._runSkills(bb.units[0], 'cooldown');
     const p = bb.projectiles[bb.projectiles.length - 1];
-    return p && p.knockback === P.knockback;
-  })(), String(P.knockback));
+    return p && !p.knockback && !bb.events.some(e => e.type === 'knock');
+  })(), '参数与事件都没有击退');
 
   /* 射 5 次后第六次是五连发 */
   const b3 = mk(['taoyao_rong']);
@@ -299,7 +302,7 @@ console.log('\n【④】春景');
     durations.length > 0 && durations.every(v => Math.abs(v - P.duration) < 0.1),
     durations.join(', '));
 
-  /* 回血速率：buff 期间每秒 20 */
+  /* 回血速率：buff 期间每秒 P.healPerSec（当前 10） */
   const b2 = mk(['taoyao_chunjing'], { timeLimit: 20 });
   const u2 = b2.units[0];
   u2.hp = 500;
@@ -314,6 +317,13 @@ console.log('\n【④】春景');
   check('回血事件不会每帧都是 0（余数累积生效）',
     healed.filter(v => v > 0).length > 0 && healed.every(v => v >= 1),
     `${healed.length} 次回血事件`);
+  /* 速率断言：buff 是"每 10 秒里有 5 秒在回血"，所以总回复量 ≈
+     healPerSec × 5 × (总时长 / 10)。这里用"每个 buff 周期回多少"来测，
+     不依赖具体时长，改 healPerSec 时断言跟着参数走。 */
+  const buffOn = b2.events.filter(e => e.type === 'buffOn').length;
+  check(`回血速率 ${P.healPerSec}/秒（每轮 buff 约 ${P.healPerSec * P.duration} 点）`,
+    buffOn > 0 && Math.abs(total - P.healPerSec * P.duration * buffOn) <= 4 * buffOn,
+    `${buffOn} 轮 buff / 共回 ${total} 点 / 期望约 ${P.healPerSec * P.duration * buffOn} 点`);
 
   /* 光炮：每 2.5 秒一发，180 伤害 */
   const shots = b2.events.filter(e => e.type === 'shoot' && e.tag === 'chunjing_cannon');
@@ -364,21 +374,24 @@ console.log('\n【⑤】陀螺');
   check('满层移速', Math.abs(u.speed / SCALE - (120 + P.speedPer * P.maxStacks)) < 0.01,
     String(u.speed / SCALE));
 
-  /* 回血：每秒 1×层数。
-     两个坑：
-       · 用 unit.healed（引擎记的累计回复量）而不是血量差 ——
-         这是真对局，敌人也在打它，血量差把伤害混进来了；
-       · 必须先把血扣下去 —— 满血时回血被上限吃掉，一点都记不上。 */
+  /* 回血已按作者要求去掉。
+     同样写成反向断言：以前这里测的是"10 层每秒回 10 点"，
+     现在测"10 层也一点都不回"。要先把血扣下去才测得出来 ——
+     满血时回血被上限吃掉，就算是坏实现也看不出来。 */
   const b2 = mk(['taoyao_top'], { timeLimit: 20 });
   const u2 = b2.units[0];
   for (let i = 0; i < 10; i++) b2._runHooks(u2, 'onDamaged', { heavy: true, amount: 1 });
   check('满 10 层', u2.spinStacks === 10, String(u2.spinStacks));
-  u2.hp = Math.round(u2.maxHp * 0.5);       // 留出回血空间，否则全被上限吃掉
+  u2.hp = Math.round(u2.maxHp * 0.5);       // 留出回血空间，否则坏实现也看不出来
   const healed0 = u2.healed;
   for (let i = 0; i < 600; i++) b2.step();  // 10 秒
   const gained = u2.healed - healed0;
-  check('10 层时每秒回约 10 点（10 秒约 100 点）', Math.abs(gained - 100) <= 8,
-    `10 秒回了 ${gained} 点`);
+  check('满 10 层也不回血（作者已去掉）', gained === 0, `10 秒回了 ${gained} 点`);
+  /* 去掉的只是回血，层数驱动的那三件事必须都还在 */
+  check('去掉回血后层数依然驱动伤害与移速',
+    u2.spinStacks === 10 &&
+    Math.abs(u2.speed / SCALE - (120 + P.speedPer * 10)) < 0.01,
+    `层数 ${u2.spinStacks} / 移速 ${(u2.speed / SCALE).toFixed(1)}`);
 
   /* 旋转角在推进（渲染层靠它转贴图） */
   const a0 = u2.spinAngle;
