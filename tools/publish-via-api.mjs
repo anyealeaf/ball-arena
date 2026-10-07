@@ -279,14 +279,37 @@ try {
   }
 }
 
+/** 上传一个 blob，偶发失败自动重试（指数退避）。 */
+async function uploadBlob(buf, tries = 4) {
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await api('POST', `${API}/git/blobs`, {
+        content: buf.toString('base64'), encoding: 'base64',
+      });
+    } catch (err) {
+      lastErr = err;
+      /* 4xx 里只有 429（限流）和 400 值得重试；401/403 是凭据问题，重试没意义 */
+      const st = err.status || 0;
+      if (i === tries - 1 || (st && st !== 400 && st !== 429)) break;
+      await new Promise(r => setTimeout(r, 400 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 console.log('上传 blobs …');
 const shaByPath = new Map();
 let done = 0, uploadedBytes = 0;
 for (const f of files) {
   const buf = fs.readFileSync(f.full);
   let blob;
+  /* 重试：119 个文件的上传里遇到过 GitHub 偶发 400（"malformed request"），
+     同一个文件、同样的请求体重跑就过了 —— 是服务端抖动，不是内容有问题。
+     没有重试的话整个发布就此中断，而 blob 是**内容寻址**的，
+     重传已经成功的那些不会产生额外对象，所以重试的代价几乎为零。 */
   try {
-    blob = await api('POST', `${API}/git/blobs`, { content: buf.toString('base64'), encoding: 'base64' });
+    blob = await uploadBlob(buf);
   } catch (err) {
     process.stdout.write('\n');
     console.error(`✘ 上传失败：${f.rel}（${(buf.length / 1024).toFixed(0)} KB）`);
