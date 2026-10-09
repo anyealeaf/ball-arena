@@ -260,6 +260,59 @@ export function statSummary(run) {
   ];
 }
 
+/* ---------- 玩家球"继承"技能自带的美术与资源条 ----------
+   玩家球是一颗**技能池宿主**：它自己什么美术都没有（`hero` 球种的
+   sticker / bow / domain / resource 全是 null），而技能带来的一般不只是机制 ——
+   桃夭的映霞要靠**弓**画拉弓与搭箭（箭长也是按弓估的）、
+   晕彩的辉光领域要靠 `domain` 拿背景层图片、见晴的护盾与缇娜的魔力是**资源条**。
+   这些字段在正常球种上由 `makeUnitStats` 从 species 抄过来，玩家球身上就是空的，
+   于是抽到这些技能时会出现"机制在跑、画面什么都没有"：
+
+     · 拉弓两帧 / 搭在弓上的箭 / 五连发扇形**一样都不画**（渲染层没有 bow 直接返回），
+       箭长还会算成 0 → 渲染层按兜底尺寸画，比例与偏移都不对；
+     · 辉光领域只剩那点闪避，展开气浪与极光层一点都不画；
+     · 水镜护盾永远攒不起来（连护盾条都不画）；蝙蝠回身加的魔力永远是 0，
+       "偷学"一次都不会触发。
+
+   规则：**按"抽到的技能属于哪个球种"把这些字段补上**。
+   为什么可以无脑补（不怕补了用不上）：
+     · 弓只在 `castP > 0`（正在拉弓）时才画 —— 没装映霞的球拿到弓也不会举着它；
+     · 领域背景只在「辉光领域」真的装在身上时才展开（技能自己开的开关）；
+     · 资源条只有一个槽位，所以**先抽到的那个球种的资源条生效**（见下面的说明）。 */
+const INHERIT_FIELDS = ['bow', 'domain', 'stickerBloom'];
+
+/** 某个技能是哪个球种的（技能表里有它的第一个球种） */
+function speciesOwningSkill(skillId) {
+  return SPECIES.find(s => (s.skills || []).includes(skillId)) || null;
+}
+
+/** 把技能自带的美术 / 资源条补给这个单位的初始数值（就地改 st） */
+export function inheritSkillArt(st, skillIds) {
+  const ids = skillIds || [];
+  for (const id of ids) {
+    const owner = speciesOwningSkill(id);
+    if (!owner) continue;
+    for (const f of INHERIT_FIELDS) if (!st[f] && owner[f]) st[f] = owner[f];
+  }
+  /* 资源条：只认**声明了要用它**的技能（skills.js 的 usesResource）——
+     否则抽到见晴的④起飞也会给他挂一条永远为 0 的护盾条。
+     两个球种的资源条都要用时只可能生效一个（引擎每个单位只有一条资源），
+     按**抽取顺序**先到先得；要"两条同时显示"得改引擎（不止一条资源条）。 */
+  if (!st.resource) {
+    for (const id of ids) {
+      const sk = getSkill(id);
+      const rid = sk && sk.usesResource;
+      if (!rid) continue;
+      const owner = SPECIES.find(s => s.resource && s.resource.id === rid);
+      if (owner) {
+        st.resource = { ...owner.resource, value: owner.resource.init || 0 };
+        break;
+      }
+    }
+  }
+  return st;
+}
+
 /**
  * 由运行状态 + 关卡描述生成战斗配置。
  * 玩家球：血量/移速/碰撞伤害都带上成长；技能是"已获得的全部技能"（无上限）。
@@ -273,6 +326,10 @@ export function buildLevelConfig(run, levelSpec) {
      技能都没有，于是会被整份滤空。所以这里把技能直接写回去（互斥组的整理
      交给引擎的 resolveLoadout，那一步仍然生效）。 */
   hero.skills = run.skills.slice();
+  /* 技能自带的美术与资源条（弓 / 领域 / 护盾条 / 魔力条）也一并继承 ——
+     少了这一步，抽到桃夭 / 晕彩 / 见晴 / 缇娜 的技能会出现"机制在跑、
+     画面什么都没有"（作者报的"部分特效丢失"）。 */
+  inheritSkillArt(hero, run.skills);
   hero.maxHp = run.maxHp;
   hero.hp = Math.max(1, Math.min(run.maxHp, run.hp));   // 血量跨关连续
   hero.speed = run.speed;
@@ -287,6 +344,10 @@ export function buildLevelConfig(run, levelSpec) {
         const st = makeUnitStats(e.speciesId, e.skills, { maxSkills: Infinity });
         st.maxHp = Math.round(st.maxHp * (e.hpMul || 1));
         st.atkMul = e.atkMul || 1;
+        /* 敌人的攻击统一画成暗红色（作者 2026-10）：
+           闯关模式里"谁打我"必须一眼看出来 —— 玩家的攻击保留各自的美术色，
+           敌人的全部变成暗红。引擎只带这个标记，配色在 render.js 里定。 */
+        st.hostileLook = true;
         st.name = (e.boss ? 'BOSS·' : '') + st.name;
         return { slot: 100 + i, stats: st };
       }),

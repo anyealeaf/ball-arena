@@ -252,6 +252,10 @@ console.log('\n【2】WASD 八向移动');
 console.log('\n【3】主动技能：按键发动、冷却、鼠标定方向');
 {
   const ui = startBattle();
+  /* 还在"斗蛐蛐开始"的遮罩上（一帧都还没打）：弹道贴图就该已经在加载了。
+     实时模式开战那一刻还没有任何弹道，靠"调色板长出来再补"必然晚一帧 ——
+     所以要开局就扫技能参数表把全集预热掉（render.js 的 preloadSprites）。 */
+  const boltWarmedBeforeStart = stickerPaths().includes('assets/characters/yuncai_bolt.png');
   clickStart(ui);
   runFrames(2);
   const battle = ui.canvas.__battle;
@@ -325,11 +329,22 @@ console.log('\n【3】主动技能：按键发动、冷却、鼠标定方向');
   check('同一帧内按下又松开，这一发照样打得出去（按下会被锁存）',
     shots() === beforeTap + 1, `${beforeTap} → ${shots()}`);
 
-  /* ---- 弹道贴图要在"画到它之前"就开始加载 ---- */
+  /* ---- 弹道贴图要在"画到它之前"就开始加载 ----
+     两条都要成立：
+       ① 进战斗界面那一刻就已经在加载（`preloadSprites` 扫技能参数表，
+          实时模式**开局**就把全集预热 —— 这是最强的一条：连"第一发"都不会空）；
+       ② 调色板每长出新条目还会补一次（`preloadProjSprites` / warmSprites，
+          老路子，留着兜"开局之后才出现的新弹道"）。 */
   const boltPath = 'assets/characters/yuncai_bolt.png';
-  check(`弹道贴图在绘制前就预热（调色板一长出来就加载 ${boltPath}）`,
-    imgStacks.some(s => /preloadProjSprites/.test(s)) && stickerPaths().includes(boltPath),
-    `已登记 ${stickerPaths().length} 张，其中带 preload 调用栈的 ${imgStacks.filter(s => /preloadProjSprites/.test(s)).length} 次`);
+  const preloadStack = s => /preload(Proj)?Sprites/.test(s);
+  check(`开局（还没点开始）就把弹道贴图预热上了（${boltPath}）`,
+    boltWarmedBeforeStart, boltWarmedBeforeStart ? '已登记' : '没登记');
+  check(`弹道贴图在绘制前就预热（${boltPath} 已经登记）`,
+    stickerPaths().includes(boltPath),
+    `已登记 ${stickerPaths().length} 张`);
+  check('而且预热走的是 preload 那条路（不是"画的时候才现加载"）',
+    imgStacks.some(preloadStack),
+    `带 preload 调用栈的 ${imgStacks.filter(preloadStack).length} 次`);
 }
 
 /* ---------- 7) 被动 / 形态技能照旧自动触发 ---------- */

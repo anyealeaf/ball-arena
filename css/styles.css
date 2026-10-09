@@ -495,3 +495,41 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
   margin-bottom: 6px; color: var(--ink);
 }
 .start-box .btn { margin-top: 10px; font-size: 15px; padding: 8px 22px; }
+
+/* ---------- 战斗中的「按键设置」面板（玩家操控 / 闯关肉鸽）----------
+   作者 2026-10 的要求：肉鸽里没有准备界面，抽到新技能必须能在关卡里改键。
+   固定定位盖住整个视口（战斗界面里滚动位置不定），背景压暗一档。
+   同样用 .show + hidden 双重控制（见文件开头的 hidden 坑）。 */
+.kb-layer {
+  position: fixed; inset: 0; z-index: 40;
+  display: none; align-items: center; justify-content: center;
+  background: rgba(24, 22, 18, 0.5);
+  padding: 18px;
+}
+.kb-layer.show { display: flex; }
+.kb-box {
+  background: #fdfcf7; border: 1px solid var(--line); border-radius: 12px;
+  padding: 16px 18px; max-width: 620px; width: 100%;
+  max-height: 86vh; overflow: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .28);
+}
+.kb-title { font-weight: 700; font-size: 17px; margin-bottom: 10px; }
+.kb-title small { font-weight: 400; color: var(--muted); margin-left: 8px; font-size: 12.5px; }
+
+/* ---------- 闯关肉鸽：一关打完之后盖在战场上的结算浮层 ----------
+   过关 / 阵亡都要有一个明确的下一步按钮 —— 之前这里什么都没有，
+   打完就卡在战场画面上（作者实测："没有进入下一关的按钮"）。 */
+.rg-end-layer {
+  position: absolute; inset: 0; z-index: 8;
+  display: none; align-items: center; justify-content: center;
+  background: rgba(253, 252, 247, 0.78);
+  backdrop-filter: blur(1.5px);
+}
+.rg-end-layer.show { display: flex; }
+.rg-end-box { text-align: center; padding: 16px 24px; max-width: 460px; }
+.rg-end-title { font-weight: 700; font-size: 21px; margin-bottom: 6px; }
+.rg-end-title.win { color: #15803d; }
+.rg-end-title.lose { color: var(--bad); }
+.rg-end-box .hint { margin-bottom: 10px; }
+.rg-end-box .btn { margin-top: 8px; font-size: 15px; padding: 8px 22px; }
+

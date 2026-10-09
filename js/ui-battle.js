@@ -8,11 +8,12 @@
    ============================================================ */
 
 import { Battle, SNAP_STRIDE } from './core.js';
-import { Renderer, preloadProjSprites, preloadStickers } from './render.js';
+import { Renderer, preloadProjSprites, preloadStickers, preloadSprites } from './render.js';
 import { audio } from './audio.js';
 import { getSoundEnabled, setSoundEnabled, getSoundVolume, setSoundVolume, getShakeEnabled, setShakeEnabled, getPlayerKeys, keyLabel } from './prefs.js';
 import { DT, SCALE, teamColor, SPECIES_BY_ID } from './balls.js';
-import { getSkill, manualSkillIds } from './skills.js';
+import { getSkill, manualSkillIds, projSpriteSrcs } from './skills.js';
+import { keybindEditorHtml, drawKeybindEditor, cancelKeyCapture } from './keybind.js';
 import { ARENA_BY_ID, zoneLabel } from './arenas.js';
 import { nextSeed } from './main.js';
 
@@ -61,6 +62,12 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
      调色板是空的。所以下面还有一个 `warmSprites()` 每帧补一次。 */
   preloadProjSprites(battle);
 
+  /* 实时模式：开局把**全集**弹道贴图一次预热掉（见 render.js preloadSprites）。
+     上面那句 preloadProjSprites 在实时模式里等于没调 —— 那一刻一枚弹道都还没生出来，
+     调色板是空的，于是某种弹道第一次出现的那一帧只能现加载（那一帧什么都不画）。
+     除了单位身上带的贴图，**技能参数里的弹道贴图**也要在这里一并预热。 */
+  if (live) preloadSprites(projSpriteSrcs());
+
   /** 实时模式的补预热：调色板/单位一变就再预热一次。
    *  · `projSpritePalette` 每多一种弹道贴图 → 立刻开始加载它（不是等第一次绘制）；
    *  · `units` 每多一个单位（析光的分身）→ 把它的球贴图/开华贴图/弓也预热。
@@ -91,8 +98,20 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
         (battle.sizeScale ?? 1) !== 1 ? `（场地 ${Math.round(battle.sizeScale * 100)}%）` : ''
       }</small></div>
       <div class="spacer"></div>
+      ${live ? '<button class="btn" id="btKeys">⌨ 按键设置</button>' : ''}
       <button class="btn" id="btBack">${exitLabel}</button>
       ${hideAgain ? '' : '<button class="btn" id="btAgain">换种子重开</button>'}
+    </div>
+
+    <div class="kb-layer" id="keysLayer" hidden>
+      <div class="kb-box">
+        <div class="kb-title">自定义按键<small>改键期间战斗暂停</small></div>
+        <div id="kbPanel"></div>
+        <div class="btnrow" style="margin-top:10px">
+          <button class="btn" id="kbClose">关闭，继续战斗</button>
+          <span class="hint">没绑按键的主动技能会自动释放（技能太多绑不过来时很正常）。</span>
+        </div>
+      </div>
     </div>
 
     <div class="battle-wrap">
@@ -156,7 +175,8 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
             <div class="hint" id="ctrlHint">
               你操控的球体带黑色光环 · <span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span>
               （或方向键）八向移动 · 鼠标位置决定弹道方向 · 主动技能按下方技能栏的按键发动，
-              被动技能（裁光 / 见晴的变色…）自动触发。按键可以在准备界面的「详细设置 → 自定义按键」里改。
+              被动技能（裁光 / 见晴的变色…）自动触发。按键随时可以点顶栏的
+              「⌨ 按键设置」改（也可以在准备界面的「详细设置 → 自定义按键」里改）。
             </div>
           ` : `
             <div class="hint">全自动模式：所有小球由 AI 自行战斗。</div>
@@ -211,7 +231,12 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
     speed: 1,
     acc: 0,
     last: performance.now(),
-    finished: false
+    finished: false,
+    /* 界面被上层接管（或自己退出）之后，播放循环必须真的停下来。
+       以前只摘监听不停循环：换关 / 回首页之后，旧的那个 rAF 循环
+       会一直画在一块已经不在页面上的画布上（每帧白画一次，
+       而且它抓着的 battle 也一直不释放）。 */
+    stopped: false
   };
 
   const speedSeg = root.querySelector('#speedSeg');
@@ -508,6 +533,51 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
     hudBox.hidden = false;
   }
 
+  /* ---------- 8.3) 战斗中的「按键设置」（玩家操控）----------
+     作者 2026-10 的要求：**闯关肉鸽里也要能改键**。
+     为什么非要有：肉鸽没有准备界面（技能是打一关抽一次、随时会多出新的），
+     而"哪个键放哪个技能"只有准备界面能改 —— 于是抽到第七个主动技能时，
+     玩家在关卡里根本没法给它安排按键。
+     面板内容与准备界面**共用** js/keybind.js（同一张键位表、同一套捕捉），
+     所以两边永远一致；捕捉用的是 window 捕获阶段 + stopPropagation，
+     改键时按下的键不会顺手把技能放出去。
+     打开时自动暂停：不然玩家低头改键的这几秒会被打死。 */
+  const keysLayer = root.querySelector('#keysLayer');
+  const kbPanel = root.querySelector('#kbPanel');
+  const keysBtn = root.querySelector('#btKeys');
+  let keysWasPlaying = false;
+
+  function kbRefresh() {
+    hudCache = '';                 // 键位变了 → 技能栏上的按键标签跟着变
+    drawHud();
+  }
+  function openKeys() {
+    if (!keysLayer || !kbPanel) return;
+    if (kbPanel.childElementCount === 0) kbPanel.innerHTML = keybindEditorHtml(manualIds);
+    keysWasPlaying = ui.playing;
+    ui.playing = false;
+    playBtn.textContent = '▶ 播放';
+    keysLayer.hidden = false;
+    keysLayer.classList.add('show');
+    drawKeybindEditor(kbPanel, manualIds, kbRefresh);
+  }
+  function closeKeys() {
+    if (!keysLayer) return;
+    cancelKeyCapture();
+    keysLayer.hidden = true;
+    keysLayer.classList.remove('show');
+    /* 恢复打开之前的播放状态（本来就是暂停的就不动它） */
+    if (keysWasPlaying && !battle.over) {
+      ui.playing = true;
+      ui.resetClock = true;        // 别把改键这段时间当成"已经过去了"
+      playBtn.textContent = '⏸ 暂停';
+    }
+    keysWasPlaying = false;
+  }
+  if (keysBtn) keysBtn.onclick = () => openKeys();
+  const kbClose = root.querySelector('#kbClose');
+  if (kbClose) kbClose.onclick = () => closeKeys();
+
   /** 尺寸信息面板：排查"场地显示与页面不一致"这类布局问题用 */
   function updateDebug() {
     if (!dbgBox) return;
@@ -660,6 +730,7 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
 
   /* ---------- 9) 播放循环 ---------- */
   function loop(now) {
+    if (ui.stopped) return;          // 界面已被接管/退出：这一帧起不再续
     /* 点「斗蛐蛐开始」的那一帧要重置计时基准（见 ui.resetClock 的注释） */
     if (ui.resetClock) { ui.last = now; ui.resetClock = false; }
     const dtms = Math.min(120, now - ui.last);
@@ -788,8 +859,11 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
     if (simDone && ui.frame >= totalFrames) {
       if (ui.playing) { ui.playing = false; playBtn.textContent = '▶ 播放'; }
       drawResult();
-      /* 只通知一次（闯关模式靠它判定过关 / 阵亡） */
-      if (onEnd && !ui.endNotified) { ui.endNotified = true; onEnd(battle); }
+      /* 只通知一次（闯关模式靠它判定过关 / 阵亡）。
+         第二个参数是"接管控制权"的口子：上层（肉鸽）打完这一关要换界面，
+         它调 screen.stop() 就能让这个循环与所有监听真的停下来 ——
+         不停的话旧循环会一直画在一块已经不在页面上的画布上。 */
+      if (onEnd && !ui.endNotified) { ui.endNotified = true; onEnd(battle, screenGuard); }
     }
 
     requestAnimationFrame(loop);
@@ -949,6 +1023,8 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
 
   function detach() {
     screenGuard.alive = false;
+    ui.stopped = true;
+    cancelKeyCapture();
     keysDown.clear();
     keysEdge.clear();
     window.removeEventListener('resize', onResize);
@@ -974,7 +1050,7 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
      *  所以那种情况要看播放头有没有播到头 —— 用 battle.over 判会把全自动模式
      *  当成"打完了"，守门人等于没挂（check-boot 就是这么抓出来的）。 */
     running() {
-      if (!ui.started) return false;
+      if (ui.stopped || !ui.started) return false;
       return live ? !battle.over : ui.frame < totalFrames;
     },
     /** 路由问它："这次跳转能走吗？" true = 拦下来（地址会被改回 #/battle）。 */
@@ -992,6 +1068,10 @@ export function renderBattle(root, cfg, onExit, opts = {}) {
       guardNoticeFrames = 160;
       return true;
     },
+    /** 上层接管界面：停掉播放循环 + 摘掉所有监听。
+     *  画布与 DOM 留在原地（可以再往上盖一层结算浮层），
+     *  上层决定什么时候把 root 换掉。 */
+    stop() { ui.stopped = true; detach(); },
     detach,
   };
 

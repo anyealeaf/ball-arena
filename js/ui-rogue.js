@@ -46,16 +46,27 @@ export function renderRogue(root, onExit) {
 
   const rndFor = (level) => mulberry32((state.seed ^ (level * 2654435761)) >>> 0);
 
-  root.innerHTML = `
-    <div class="topbar">
-      <div class="brand">闯关肉鸽<small>逐关变强 · 每次开局都不一样</small></div>
-      <div class="spacer"></div>
-      <button class="btn" id="rgBack">返回首页</button>
-    </div>
-    <div id="rgBody"></div>
-  `;
-  const body = root.querySelector('#rgBody');
-  root.querySelector('#rgBack').onclick = () => onExit();
+  /* ---------- 挂界面骨架 ----------
+     ⚠ 必须能**重复调用**：战斗界面是直接把 `root` 整个换掉的
+     （`renderBattle` 里那句 `root.innerHTML = …`），所以每次从战斗回到
+     肉鸽自己的页面（过关抽奖励 / 阵亡结算 / 中途退出）都要先把
+     顶栏与 `#rgBody` 重新挂回来。
+     以前只有开头挂一次、`body` 一直指着那个**已经被换掉的**节点：
+     打完一关之后所有"下一步"都画进了一个不在页面上的 div，
+     表现就是"通关之后既没有按钮、也看不到抽技能"（作者实测）。 */
+  let body = null;
+  function mount() {
+    root.innerHTML = `
+      <div class="topbar">
+        <div class="brand">闯关肉鸽<small>逐关变强 · 每次开局都不一样</small></div>
+        <div class="spacer"></div>
+        <button class="btn" id="rgBack">返回首页</button>
+      </div>
+      <div id="rgBody"></div>
+    `;
+    body = root.querySelector('#rgBody');
+    root.querySelector('#rgBack').onclick = () => onExit();
+  }
 
   /* ---------- 公共片段 ---------- */
   const skillLine = id => {
@@ -191,6 +202,10 @@ export function renderRogue(root, onExit) {
         <div class="separator"></div>
         <div class="hint" style="margin-bottom:4px">已获得 ${run.skills.length} 个技能：</div>
         <div class="rg-tags">${learned}</div>
+        <div class="hint" style="margin-top:8px">
+          技能数量没有上限；<b>没绑按键的主动技能会自动释放</b>。
+          战斗中随时可以点顶栏的「⌨ 按键设置」改键（改键时战斗会暂停）。
+        </div>
       </div>`;
 
     body.querySelectorAll('[data-take]').forEach(b => {
@@ -232,22 +247,38 @@ export function renderRogue(root, onExit) {
     state.phase = 'battle';
     const cfg = buildLevelConfig(run, spec);
     const enemies = spec.enemies.length;
-    renderBattle(root, cfg, () => { state.phase = 'over'; drawOver(false); }, {
+    /* 从战斗中主动退出（顶栏的「退出闯关」）：算作放弃这一局 ——
+       战斗界面已经把自己拆干净了，这里只要把肉鸽的外框挂回来再画结算页。 */
+    const exitBattle = () => {
+      state.phase = 'over';
+      state.message = `第 ${run.level} 关中途退出。`;
+      mount();
+      drawOver(false);
+    };
+    renderBattle(root, cfg, exitBattle, {
       title: `第 ${run.level} 关 · 难度 ${spec.difficulty}${spec.boss ? ' · BOSS' : ''}`,
       subtitle: `${spec.arena.name}（场地 ${Math.round(spec.sizeScale * 100)}%）· ${enemies} 个敌人`,
       hideAgain: true,
       exitLabel: '退出闯关',
-      onEnd: (battle) => afterBattle(battle),
+      onEnd: (battle, screen) => afterBattle(battle, screen),
     });
   }
 
-  /** 一关打完之后：判定过关 / 阵亡，并给出下一步 */
-  function afterBattle(battle) {
+  /** 一关打完之后：判定过关 / 阵亡，并在战场画面上盖一层"下一步"浮层。
+   *
+   *  为什么要浮层而不是直接跳到抽奖页：打完之后玩家至少该看清"这关过了没有、
+   *  回了多少血、记录破没破"，而且作者要的就是一个明确的按钮 ——
+   *  之前这里只是改了 `state.phase` 却**什么都没画**，
+   *  于是打完就停在战场画面上，既没有按钮也看不到抽技能。 */
+  function afterBattle(battle, screen) {
     const run = state.run;
     const hero = battle.units[battle.playerIdx];
     run.hp = Math.max(0, Math.round(hero ? hero.hp : 0));
     const boss = isBossLevel(run.level);
-    if (hero && hero.alive) {
+    const won = !!(hero && hero.alive);
+
+    let title, detail;
+    if (won) {
       /* 过关：回 250 血（BOSS 关完全回血 + 额外一次"三样全给"） */
       state.cleared = run.level;
       recordLevel(state.cleared);
@@ -255,30 +286,60 @@ export function renderRogue(root, onExit) {
       if (boss) {
         run.hp = run.maxHp;
         applyStatGain(run, 'all');
-        state.message = `通过第 ${run.level} 关（BOSS）：生命全满，并且额外获得 ` +
-          `+${STAT_GAIN.hp} 生命 / +${STAT_GAIN.speed} 移速 / +${STAT_GAIN.dmg} 伤害。`;
+        detail = `BOSS 关奖励：生命全满，并且额外获得 +${STAT_GAIN.hp} 生命 / ` +
+          `+${STAT_GAIN.speed} 移速 / +${STAT_GAIN.dmg} 伤害。`;
       } else {
         run.hp = Math.min(run.maxHp, run.hp + 250);
-        state.message = `通过第 ${run.level} 关：回复 250 生命（${run.hp}/${run.maxHp}）。`;
+        detail = `回复 250 生命（${run.hp}/${run.maxHp}）。`;
       }
+      state.message = `通过第 ${run.level} 关：${detail}`;
+      title = `第 ${run.level} 关通过！`;
       run.level++;
-      state.drawsLeft = 1;
-      state.phase = 'draw';
+      state.drawsLeft = 1;                 // 过关奖励：再抽一次
     } else {
-      state.phase = 'over';
+      title = `第 ${run.level} 关阵亡`;
+      detail = `本次闯到第 ${run.level} 关（已通过 ${state.cleared} 关）。`;
       state.message = `第 ${run.level} 关阵亡。`;
     }
+    showOutcome({ won, title, detail, screen });
+  }
+
+  /** 盖在战场上的"下一步"浮层：过关 → 抽奖励；阵亡 → 结算 */
+  function showOutcome({ won, title, detail, screen }) {
+    const doc = root.ownerDocument || document;
+    const layer = doc.createElement('div');
+    layer.className = 'rg-end-layer show';
+    layer.innerHTML = `
+      <div class="rg-end-box">
+        <div class="rg-end-title ${won ? 'win' : 'lose'}">${title}</div>
+        <div class="hint">${detail}</div>
+        <button class="btn" id="rgNext">${won ? '继续 → 抽取奖励' : '查看本次总结'}</button>
+      </div>`;
+    root.appendChild(layer);
+    layer.querySelector('#rgNext').onclick = () => {
+      /* 先让战斗界面**真的停下**（停播放循环 + 摘掉所有监听），再换界面 ——
+         只换 DOM 不停循环的话，旧循环会一直画在一块已经不在页面上的画布上。 */
+      if (screen && typeof screen.stop === 'function') screen.stop();
+      layer.remove();
+      if (won) {
+        state.phase = 'draw';
+        mount();                 // 战斗界面把 root 整个换掉了，外框要挂回来
+        nextDraw();
+      } else {
+        state.phase = 'over';
+        mount();
+        drawOver(true);
+      }
+    };
   }
 
   /** 战斗结束后的过渡页（过关直接回到抽取页；阵亡停在这里） */
   function drawOver(dead) {
-    if (dead) { /* 由下面统一画 */ }
     const run = state.run;
     const best = state.best;
-    if (state.message && !state.message.startsWith('第')) state.message = state.message;
     body.innerHTML = `
       <div class="card">
-        <h3>闯关结束</h3>
+        <h3>${dead ? '闯关结束' : '本次闯关结束'}</h3>
         <div class="hint" style="margin-bottom:8px">
           本次闯到 <b>第 ${state.cleared + 1} 关</b>${state.cleared ? `（已通过 ${state.cleared} 关）` : ''} ·
           最高记录：<b>${best ? `第 ${best} 关` : '暂无'}</b>
@@ -294,6 +355,8 @@ export function renderRogue(root, onExit) {
       state.picks = [];
       state.seed = newSeed();
       state.run = null;
+      state.draw = null;
+      state.drawsLeft = 0;
       state.cleared = 0;
       state.message = '';
       state.best = getBestLevel();
@@ -303,5 +366,6 @@ export function renderRogue(root, onExit) {
   }
 
   /* ---------- 启动 ---------- */
+  mount();
   drawPool();
 }

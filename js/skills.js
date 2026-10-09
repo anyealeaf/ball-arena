@@ -830,11 +830,20 @@ function bowArtOf(unit, index) {
 
 /** 这支箭该画多长：**弓高 × 那套美术自己的箭长比例**。
  *  两式的弓高一样、但箭长比例不同（荣 0.3415 / 枯 0.3243），
- *  所以不能共用一个数 —— 搭在弓上的箭和飞出去的箭必须等长。 */
+ *  所以不能共用一个数 —— 搭在弓上的箭和飞出去的箭必须等长。
+ *
+ *  ⚠ 身上**没有弓**时（闯关肉鸽的玩家球如果没继承到桃夭的弓）不能返回 0：
+ *  0 会被当成真实的 `spriteLen` 写进引擎，渲染层只好按 `r*6` 兜底 ——
+ *  箭的比例与 `spriteOffX:-15` 的落点全都不对，看起来像"这个特效坏了"。
+ *  这里按单位半径给一个兜底长度（≈ 真弓算出来的那个数），
+ *  与渲染层的兜底同量级，但**由技能说了算**，不会两处各拍一个数。 */
 function arrowLenOf(unit, index) {
   const art = bowArtOf(unit, index);
   /* bowH 挂在**每一套美术**上（两把弓各自的尺寸），不是挂在 bow 上 */
-  if (!art || !(art.bowH > 0) || !(art.arrowLenFrac > 0)) return 0;
+  if (!art || !(art.bowH > 0) || !(art.arrowLenFrac > 0)) {
+    const r = (unit && unit.r ? unit.r / SCALE : 16);
+    return Math.round(r * 1.7);
+  }
   return art.bowH * art.arrowLenFrac;
 }
 
@@ -1565,6 +1574,11 @@ export const SKILL_TINA_BAT = {
         `· 我很可爱：**立刻发一根羽毛**（不用等掉血）。\n` +
         `装上「权杖」后：伤害 ×4/3，偏转角 +${TINA.scepter.turnBonusDeg}°（→ ${TINA.bat.turnPerSec + TINA.scepter.turnBonusDeg}°/秒）。`,
   trigger: { type: 'cooldown', cd: TINA.bat.cd },
+  /* 这个技能靠**魔力条**攒"偷学"（每只蝙蝠回身 +1，满 5 点触发一次）。
+     缇娜自己有这条资源，但**闯关肉鸽的玩家球没有** —— 它只是一颗技能池宿主。
+     肉鸽建关卡时靠这个声明把魔力条补给玩家球，否则魔力永远是 0、
+     偷学一次都不会触发、连那条魔力条都不画（作者报的"特效丢失"之一）。 */
+  usesResource: 'mana',
   run(ctx) {
     const { battle, unit, target } = ctx;
     const t = target || battle._nearestEnemy(unit);
@@ -1805,6 +1819,11 @@ export const SKILL_MIRROR_DEF = {
   /* 玩家操控时**仍然自动触发**（作者 2026-10）：变色属于"被动/形态"，
      不该占一个技能键。引擎读这个标记：标了 auto 的冷却技能照旧自己放。 */
   auto: true,
+  /* 这个技能要用"特殊资源条"（水镜护盾池）。见晴自己身上当然有，
+     但**闯关肉鸽的玩家球没有** —— 它是一颗"技能池宿主"，球种本身什么资源都没有。
+     肉鸽建关卡时靠这个声明把对应的资源条补给玩家球（见 rogue.js 的 inheritArt），
+     否则护盾会一直攒不起来、连那条护盾条都不画（作者报的"特效丢失"之一）。 */
+  usesResource: 'mirror',
   /* 持续发动型：完整效果是"一段持续状态"，不是"放一次就完"。
      所以被缇娜的蝙蝠偷到时，引擎会把它**临时装到缇娜身上 5 秒**
      （引擎是唯一读它的地方：见 core.js 的 grantSkill 与 skills.js 的
@@ -2437,6 +2456,31 @@ export function manualSkillIds(unit) {
     if (isManualSkill(sk)) out.push(id);
   }
   return out;
+}
+
+/* ------------------------------------------------------------
+   本作所有"弹道贴图"的路径清单
+   ------------------------------------------------------------
+   实时模式（玩家操控 / 闯关肉鸽）开局一次性预热用 —— 见 render.js 的
+   preloadSprites()。为什么要在开局预热：实时模式开战那一刻还没有任何弹道，
+   `battle.projSpritePalette` 是空的，于是某种弹道**第一次出现的那一帧**
+   才现去加载图片，而渲染层对没就绪的贴图是"宁可不画" —— 那一帧就是空的
+   （现象就是"第一发没有特效"）。
+
+   实现是**扫参数对象**而不是手写一份清单：以后新增贴图弹道只要写在
+   参数对象里就自动带上，不会出现"新加的弹道第一发是空的"。
+   （扫出来的路径多几个也无所谓：都是本地小图，而且本来就要加载。） */
+export function projSpriteSrcs() {
+  const out = new Set();
+  const isImg = s => /\.(png|jpe?g|webp|gif)$/i.test(s);
+  const visit = (o, depth) => {
+    if (o == null || depth > 5) return;
+    if (typeof o === 'string') { if (isImg(o)) out.add(o); return; }
+    if (Array.isArray(o)) { for (const v of o) visit(v, depth + 1); return; }
+    if (typeof o === 'object') { for (const k in o) visit(o[k], depth + 1); }
+  };
+  for (const o of [SKILL_PARAMS, YUNCAI, TAOYAO, TINA, JIANQING, ROGUE_BOLTS]) visit(o, 0);
+  return [...out];
 }
 
 export const SKILLS = {

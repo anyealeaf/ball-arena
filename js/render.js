@@ -121,6 +121,20 @@ export const PROJ_GLOW_RX = 0.55;      // 光晕半长轴 ÷ 图长
 export const PROJ_GLOW_RY = 0.95;      // 光晕半短轴 ÷ 图高
 export const PROJ_GLOW_FLOOR = 0.45;   // 呼吸时，光晕暗到峰值的这个比例为止
 
+/* ---------- 敌对配色（闯关模式） ----------
+   作者 2026-10 的要求：「闯关模式中所有敌对小球的攻击特效都显示为暗红色」——
+   闯关里玩家是一个人打一群，"这一发是谁打的"必须一眼可辨，所以敌人的攻击
+   统一压成暗红（玩家自己的攻击保留各自技能原本的美术色）。
+
+   · `HOSTILE_COLOR`：程序化弹道 / 光束 / 羽毛用的颜色（也当光晕色）。
+   · `HOSTILE_SPRITE_FILTER`：**贴图弹道**（箭矢 / 蝙蝠 / 能量弹…）没法直接换色，
+     用 canvas 的 `filter` 把它染成暗红：先去色 → 加棕 → 拉饱和 → 往红偏 → 调暗。
+     这两个数是**照着看**调出来的（改一行就能再调），
+     与"时间停止的灰度"用的是同一个手段（`ctx.filter`，见 _units 里那段）。 */
+export const HOSTILE_COLOR = '#7f1d1d';
+export const HOSTILE_SPRITE_FILTER =
+  'grayscale(1) sepia(1) saturate(7) hue-rotate(-28deg) brightness(0.55)';
+
 /** 呼吸相位 0~1（用 cos 的半波，两端都真的能取到）。
  *
  *  相位用**帧号**算，不用墙上时钟 —— 渲染层只读快照（见文件头），
@@ -195,6 +209,19 @@ export function preloadProjSprites(battle) {
   for (const e of (battle && battle.projSpritePalette) || []) {
     if (e && e.src) getSticker(e.src);
   }
+}
+
+/** 预加载一组贴图路径（给"实时模式"用）。
+ *
+ *  实时模式（玩家操控 / 闯关肉鸽）在**开战那一刻还没有任何弹道**，
+ *  所以 preloadProjSprites 这时候等于没调 —— 某种弹道第一次出现的那一帧
+ *  只能现加载，而渲染层对没就绪的贴图是"宁可不画"，那一帧就是空的
+ *  （作者看到的现象是"第一发没有特效"）。
+ *  以前靠每帧补一次预热（ui-battle.js 的 warmSprites）把窗口缩到一两帧，
+ *  现在**开局就把全集预热掉**：反正图片都是本地小图，
+ *  扫一遍参数对象就能拿到清单（见 skills.js 的 projSpriteSrcs）。 */
+export function preloadSprites(srcs) {
+  for (const s of srcs || []) if (s) getSticker(s);
 }
 
 /** 预加载一组球种用到的贴图（进入战斗前调用一次） */
@@ -755,46 +782,58 @@ export class Renderer {
       const kind = fl[i + 4], stage = fl[i + 5];
       const r = fl[i + 6], halfW = fl[i + 7];
       const lifeT = fl[i + 8];
+      /* 敌对标记（闯关模式的敌人）：场地物件（质点 / 细线 / 光门）也走暗红。
+         见 HOSTILE_COLOR 那一节的说明。 */
+      const hostile = fl[i + 9] > 0.5;
 
       if (kind < 0.5) {
         /* 漆黑质点：一个很小的黑点 + 一圈几乎看不见的吸收边。
-           尺寸必须和判定半径一致（判定就是 params 里的 moteR）。 */
+           尺寸必须和判定半径一致（判定就是 params 里的 moteR）。
+           敌人的质点改成暗红（"漆黑"对"这是敌人的"这件事没有帮助）。 */
+        const core = hostile ? HOSTILE_COLOR : '#05050a';
+        const halo = hostile ? 'rgba(127,29,29,0.75)' : 'rgba(10,8,20,0.7)';
         const g = ctx.createRadialGradient(x, y, 0, x, y, r * 1.8);
-        g.addColorStop(0, 'rgba(0,0,0,0.95)');
-        g.addColorStop(0.5, 'rgba(10,8,20,0.7)');
+        g.addColorStop(0, hostile ? 'rgba(127,29,29,0.95)' : 'rgba(0,0,0,0.95)');
+        g.addColorStop(0.5, halo);
         g.addColorStop(1, 'rgba(10,8,20,0)');
         ctx.fillStyle = g;
         ctx.beginPath(); ctx.arc(x, y, r * 1.8, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#05050a';
+        ctx.fillStyle = core;
         ctx.beginPath(); ctx.arc(x, y, r * 0.85, 0, Math.PI * 2); ctx.fill();
       } else if (kind < 1.5) {
         /* 细线就是"细"线：主宽度严格等于判定的 2×halfW，
            只在外侧加一点点辉光。三个阶段的颜色/亮度差异要一眼能分出来：
              0 漆黑：几乎纯黑，不发光
              1 深紫：深紫 + 微弱紫辉
-             2 微光：亮紫 + 呼吸式闪光（警告"再碰就爆"） */
+             2 微光：亮紫 + 呼吸式闪光（警告"再碰就爆"）
+           敌人的细线：三档都压成暗红（亮一档表示"快爆了"）。 */
         const coreW = halfW * 2;
         const pulse = 0.5 + 0.5 * Math.sin((frame / 60) * 5);
+        const glow = hostile ? '#b91c1c' : (stage >= 2 ? '#e879f9' : '#7c3aed');
+        const core = hostile
+          ? (stage < 0.5 ? '#7f1d1d' : (stage < 1.5 ? '#991b1b' : '#dc2626'))
+          : (stage < 0.5 ? '#05050a' : (stage < 1.5 ? '#7c3aed' : '#f0abfc'));
         if (stage >= 1) {
           ctx.globalAlpha = stage >= 2 ? (0.35 + pulse * 0.45) : 0.3;
-          ctx.strokeStyle = stage >= 2 ? '#e879f9' : '#7c3aed';
+          ctx.strokeStyle = glow;
           ctx.lineWidth = coreW + (stage >= 2 ? 3.2 : 1.8);
           ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x2, y2); ctx.stroke();
         }
         ctx.globalAlpha = 1;
-        ctx.strokeStyle = stage < 0.5 ? '#05050a' : (stage < 1.5 ? '#7c3aed' : '#f0abfc');
+        ctx.strokeStyle = core;
         ctx.lineWidth = coreW;
         ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x2, y2); ctx.stroke();
       } else {
-        /* 光门：一圈会转的双环 + 中间很淡的光膜；快消失时整体变淡 */
+        /* 光门：一圈会转的双环 + 中间很淡的光膜；快消失时整体变淡。
+           敌人的光门同样压成暗红。 */
         const fade = lifeT < 0.25 ? lifeT / 0.25 : 1;
         const t = (frame / 60) * 1.1;
         ctx.globalAlpha = 0.75 * fade;
-        ctx.strokeStyle = '#f0abfc';
+        ctx.strokeStyle = hostile ? '#b91c1c' : '#f0abfc';
         ctx.lineWidth = 2.6;
         ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
         ctx.globalAlpha = 0.55 * fade;
-        ctx.strokeStyle = '#a5f3fc';
+        ctx.strokeStyle = hostile ? '#7f1d1d' : '#a5f3fc';
         ctx.lineWidth = 1.6;
         ctx.setLineDash([7, 6]);
         ctx.lineDashOffset = -t * 22;
@@ -802,8 +841,8 @@ export class Renderer {
         ctx.setLineDash([]);
         ctx.lineDashOffset = 0;
         const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-        g.addColorStop(0, 'rgba(240,171,252,0.26)');
-        g.addColorStop(1, 'rgba(240,171,252,0)');
+        g.addColorStop(0, hostile ? 'rgba(185,28,28,0.26)' : 'rgba(240,171,252,0.26)');
+        g.addColorStop(1, hostile ? 'rgba(185,28,28,0)' : 'rgba(240,171,252,0)');
         ctx.globalAlpha = fade;
         ctx.fillStyle = g;
         ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
@@ -982,8 +1021,11 @@ export class Renderer {
         ctx.stroke();
       } else if (e.type === 'shoot') {
         /* 发射：枪口闪光。画在弹道出生点上，
-           让"技能什么时候放出来"这件事一眼可见。 */
-        const c = e.color || '#7dd3fc';
+           让"技能什么时候放出来"这件事一眼可见。
+           敌人的枪口闪光也跟着变暗红（`e.a` 就是放这一发的人）——
+           否则"暗红色的弹道配一圈紫色闪光"会显得两套东西拼在一起。 */
+        const shooter = e.a >= 0 ? battle.units[e.a] : null;
+        const c = (shooter && shooter.hostileLook) ? HOSTILE_COLOR : (e.color || '#7dd3fc');
         ctx.globalAlpha = alpha * 0.9;
         ctx.strokeStyle = c;
         ctx.lineWidth = 2;
@@ -1417,7 +1459,11 @@ export class Renderer {
     for (let i = 0; i < pj.length; i += PROJ_STRIDE) {
       const x = pj[i], y = pj[i + 1], r = pj[i + 2];
       const lifeT = pj[i + 3];                 // 1 → 0
-      const color = pal[pj[i + 4]] || '#7dd3fc';
+      /* 敌对标记（闯关模式的敌人）：**颜色与贴图都改成暗红** ——
+         作者的要求是"所有敌对小球的攻击特效都显示为暗红色"，
+         为的是"谁在打我"一眼可辨。见 HOSTILE_COLOR / HOSTILE_SPRITE_FILTER。 */
+      const hostile = pj[i + 11] > 0.5;
+      const color = hostile ? HOSTILE_COLOR : (pal[pj[i + 4]] || '#7dd3fc');
       const ptype = pj[i + 5];                 // 0 特效 / 1 实体 / 2 光束 / 3 锚定光柱 / 4 羽毛
       const isBeam = ptype > 1.5;
       /* 锚定光柱（公主传承3）：从锚点**向前**画，长度由弹道自己带着。
@@ -1445,9 +1491,11 @@ export class Renderer {
         const wid = Math.max(3.5, r * 1.2);
         const fadeIn = lifeT < 0.25 ? lifeT / 0.25 : 1;
         ctx.globalAlpha = 0.75 * fadeIn;
+        /* 羽毛的柔光是淡蓝的；敌人的羽毛（BOSS 见晴）压成暗红 */
+        const fg = hostile ? '127,29,29' : '191,227,255';
         const g = ctx.createRadialGradient(x, y, 0, x, y, len * 0.9);
-        g.addColorStop(0, 'rgba(191,227,255,0.55)');
-        g.addColorStop(1, 'rgba(191,227,255,0)');
+        g.addColorStop(0, `rgba(${fg},0.55)`);
+        g.addColorStop(1, `rgba(${fg},0)`);
         ctx.fillStyle = g;
         ctx.beginPath(); ctx.arc(x, y, len * 0.9, 0, Math.PI * 2); ctx.fill();
         ctx.translate(x, y);
@@ -1509,16 +1557,17 @@ export class Renderer {
           ctx.translate(x, y);
           ctx.rotate(Math.atan2(dirY, dirX));   // 光晕是椭圆，必须跟着转
 
-          /* ① 光晕：画在图下面，颜色按弹道种类给 */
-          if (spr.glow) {
+          /* ① 光晕：画在图下面，颜色按弹道种类给（敌人 → 暗红） */
+          if (spr.glow || hostile) {
+            const glowColor = hostile ? HOSTILE_COLOR : spr.glow;
             const grx = Math.max(1, len * PROJ_GLOW_RX);
             const gry = Math.max(1, hgt * PROJ_GLOW_RY);
             /* 不呼吸的那些：pulse = 1 → 光晕恒为峰值（不动） */
             const ga = PROJ_GLOW_ALPHA * fade * (PROJ_GLOW_FLOOR + (1 - PROJ_GLOW_FLOOR) * pulse);
             const g = ctx.createRadialGradient(offX, offY, 0, offX, offY, Math.max(grx, gry));
-            g.addColorStop(0, hexA(spr.glow, ga));
-            g.addColorStop(0.55, hexA(spr.glow, ga * 0.4));
-            g.addColorStop(1, hexA(spr.glow, 0));
+            g.addColorStop(0, hexA(glowColor, ga));
+            g.addColorStop(0.55, hexA(glowColor, ga * 0.4));
+            g.addColorStop(1, hexA(glowColor, 0));
             ctx.globalAlpha = 1;
             ctx.fillStyle = g;
             ctx.beginPath();
@@ -1527,9 +1576,13 @@ export class Renderer {
             ctx.fill();
           }
 
-          /* ② 图本身；寿命末端整体淡出（那是"快消失了"，不是呼吸） */
+          /* ② 图本身；寿命末端整体淡出（那是"快消失了"，不是呼吸）。
+             敌人：用 filter 把**贴图本身**也染成暗红 —— 光晕改色还不够，
+             箭矢 / 蝙蝠这些有美术的弹道照样能一眼认出是谁的。 */
           ctx.globalAlpha = fade * artA;
+          if (hostile) ctx.filter = HOSTILE_SPRITE_FILTER;
           ctx.drawImage(st.img, offX - len / 2, offY - hgt / 2, len, hgt);
+          if (hostile) ctx.filter = 'none';
           ctx.restore();
           continue;
         }

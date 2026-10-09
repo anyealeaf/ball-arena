@@ -27,17 +27,18 @@ export const SNAP_STRIDE = 20;
 /* 弹道步长：
      0 x  1 y  2 r  3 剩余寿命比例 1~0  4 颜色下标  5 kind(0 特效 / 1 实体 / 2 光束)
      6 宽度  7 方向 x  8 方向 y  9 贴图下标(-1 = 无)  10 光束长度
+     11 敌对标记(0/1)：闯关模式里敌人的攻击统一画成暗红色，见 render.js 的 HOSTILE_COLOR
    方向是给激光这类"长条"弹道画拖影用的 —— 速度 1000 的激光每帧走 16 单位，
    只画一个圆点会变成断断续续的虚线。它同时也是贴图弹道的**朝向**：
    箭矢要沿着飞行方向转，不然会横着飞。 */
-export const PROJ_STRIDE = 11;
+export const PROJ_STRIDE = 12;
 /* 场地物件步长（质点 / 细线 / 光门）：
      0 x  1 y  2 x2  3 y2  4 kind(0 质点 / 1 细线 / 2 光门)
-     5 阶段  6 半径  7 半宽  8 剩余寿命比例
+     5 阶段  6 半径  7 半宽  8 剩余寿命比例  9 敌对标记(0/1)
    **必须进快照**：否则渲染层只能读 battle.fields 的"最终状态"，
    把进度条拖回开头也会看到整局打完后的所有细线 ——
    看起来就像"细线在开局就凭空出现在场上"。 */
-export const FIELD_STRIDE = 9;
+export const FIELD_STRIDE = 10;
 
 /* 每帧持续伤害的事件上限。
    这类伤害一秒能产生几十上百条事件，如果不设上限会把事件流的
@@ -584,6 +585,9 @@ function buildUnits(config, rnd) {
            这些技能出手时会被当成"带光的攻击"：伤害 +50（光加成）、
            弹道带上 light 特质（能被裁光的细线吸收、喂光）。 */
         lightSkills: st.lightSkills || null,
+        /* 敌对配色（闯关肉鸽的敌人）：它放出来的攻击在画面上统一是暗红色。
+           引擎只把这个标记抄给弹道，具体画成什么颜色由渲染层决定。 */
+        hostileLook: !!st.hostileLook,
         lightBonus: 0,         // "光"特质攻击的附加伤害（开华 +50）
         summoner: st.summoner ?? -1,    // 召唤它的单位 id（-1 = 原生单位）
         stickerBloom: st.stickerBloom || null,  // 开华形态的贴图
@@ -1043,6 +1047,12 @@ export class Battle {
            贴了一张图就按 dirX/dirY 转着画 —— 箭矢靠这个画成真箭。 */
         proj[o + 9] = p.spriteIdx ?? -1;
         proj[o + 10] = p.beamLen || 0;
+        /* 11 敌对标记：闯关模式里敌人放出来的攻击统一画成暗红色
+           （作者 2026-10："闯关模式中所有敌对小球的攻击特效都显示为暗红色"）。
+           为什么进快照而不是让渲染层问 battle.units[owner]：
+           快照里**没有 owner**（owner 的下标会被单位增删影响），
+           而"这一枚是谁放的"正是着色要用的信息 —— 在出生那一刻定死最稳。 */
+        proj[o + 11] = p.hostile ? 1 : 0;
       }
     }
 
@@ -1063,6 +1073,10 @@ export class Battle {
         fld[o + 6] = f.r / SCALE;
         fld[o + 7] = f.halfW / SCALE;
         fld[o + 8] = f.maxLife > 0 ? Math.max(0, f.life / f.maxLife) : 1;
+        /* 9 敌对标记：闯关模式里敌人的场地物件（裁光的质点 / 细线、棱镜的光门）
+           也统一画成暗红色 —— 和弹道同一条规则。 */
+        const owner = this.units[f.owner];
+        fld[o + 9] = (owner && owner.hostileLook) ? 1 : 0;
       }
     }
     /* ts = 时间停止的豁免者下标（-1 = 没在停止中）。
@@ -1773,6 +1787,10 @@ export class Battle {
       team: p.owner ? p.owner.team : -1,
       x: p.x, y: p.y,
       vx: p.vx, vy: p.vy,
+      /* 敌对标记：主人的 hostileLook 为真时，这一枚在画面上是**暗红色**的
+         （闯关模式的敌人；渲染层只认这个标记，不认队伍 —— 斗蛐蛐那种
+         "两边都是 AI"的局里没有"敌对"这回事）。 */
+      hostile: !!(p.owner && p.owner.hostileLook),
       /* 光附魔（闯关肉鸽）：被附魔的技能出手时，它放出来的弹道伤害 +50。
          见下面 traits 的说明 —— 在"弹道出生"这一个出口加，所有技能一视同仁。 */
       damage: p.damage + ((p.owner && p.owner.lightTemp > 0) ? LIGHT_ENCHANT_BONUS : 0),
@@ -2454,6 +2472,7 @@ export class Battle {
       atkMul: stats.atkMul ?? 1,
       skillBonus: stats.skillBonus ?? 0,
       lightSkills: stats.lightSkills || null,
+      hostileLook: !!stats.hostileLook,
       lightBonus: 0,
       summoner: owner.id,
       hooks: {},

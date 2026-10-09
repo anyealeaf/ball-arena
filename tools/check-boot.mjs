@@ -244,6 +244,76 @@ const check = (name, ok, detail = '') => checks.push({ name, ok: !!ok, detail })
         rb.units.length - 1 >= 1 && rb.units.length - 1 <= 2, `${rb.units.length - 1} 个敌人`);
       check('肉鸽关卡打起来不报错（跑 30 帧）', env.calls.n > 0, `${env.calls.n} 次绘制调用`);
       check('没有"页面没能启动"', !text().includes('页面没能启动'));
+
+      /* ---- 战斗中的「按键设置」（作者 2026-10：肉鸽里没有准备界面，
+         抽到新技能必须能在关卡里改键）---- */
+      {
+        const kbBtn = app.querySelector('#btKeys');
+        check('战斗界面有「⌨ 按键设置」按钮（玩家操控时才有）', !!kbBtn);
+        if (kbBtn) {
+          guard('点按键设置', () => kbBtn.onclick());
+          const panel = app.querySelector('#kbPanel');
+          const kbs = panel ? [...panel.querySelectorAll('[data-kb]')] : [];
+          check('按键面板打开、列出键位（默认 6 个）', kbs.length === 6, `${kbs.length} 个键位`);
+          check('键位按钮上写着默认键（鼠标左键在最前）',
+            (kbs[0].textContent || '').trim() === '鼠标左键',
+            (kbs[0].textContent || '').trim());
+          /* 对照表：有主动技能就写"键 → 技能"，一个主动技能都没有时说明"不需要按键"。
+             （开局抽到哪个技能是随机的，两种都是正常结果。） */
+          const mapTxt = (panel.querySelector('#keybindMap') || {}).textContent || '';
+          check('面板里有"键位 → 技能"对照（或明确说明这个球没有主动技能）',
+            mapTxt.includes('→') || /没有主动技能/.test(mapTxt), mapTxt.slice(0, 50));
+          /* 改键：点一个键位再按新键（捕捉走 window 捕获阶段） */
+          guard('点第二个键位', () => kbs[1].onclick());
+          const kev = new env.window.Event('keydown', { bubbles: true, cancelable: true });
+          kev.code = 'KeyQ';
+          env.window.dispatchEvent(kev);
+          const prefs = await import('../js/prefs.js');
+          check('关卡里改键真的写进了偏好（第二个键位变成 Q）',
+            prefs.getPlayerKeys()[1] === 'KeyQ',
+            prefs.getPlayerKeys().join(','));
+          guard('关掉按键面板', () => app.querySelector('#kbClose').onclick());
+          check('关掉之后面板藏起来（战斗继续）',
+            app.querySelector('#keysLayer').hidden === true);
+        }
+      }
+
+      /* ---- 一关打完 → 有"下一步"按钮 → 抽奖励 → 下一关（作者报的 bug：
+         "通关一关之后没有进入下一关的按钮，也没有显示抽取技能"）----
+         这里不靠"打到分出胜负"（那要几百帧、还可能输），
+         直接用引擎自己的伤害出口把敌人打死，再让引擎跑一帧把 over 结算出来。 */
+      {
+        const enemy0 = rb.units.find(u => u !== hero);
+        guard('打死关卡的敌人', () => {
+          if (enemy0) rb._damage(hero, enemy0, 999999, 'skill');
+          while (!rb.over) rb.step({});          // 引擎自己判定"只剩一队"
+        });
+        env.runFrames(4);
+        const layer = app.querySelector('.rg-end-layer');
+        check('过关之后战场上有"下一步"浮层（以前什么都没有、卡在战场上）',
+          !!layer && layer.classList.contains('show'));
+        const nextBtn = layer && layer.querySelector('#rgNext');
+        check('浮层上有一个明确的按钮', !!nextBtn,
+          nextBtn ? nextBtn.textContent.trim() : '（没有按钮）');
+        check('浮层写着"通过"与回复了多少血',
+          /通过/.test((layer && layer.textContent) || ''),
+          ((layer && layer.textContent) || '').replace(/\s+/g, ' ').slice(0, 60));
+        if (nextBtn) {
+          guard('点继续', () => nextBtn.onclick());
+          check('回到抽取页：抽到的是"通过第 1 关"的奖励',
+            /通过第 1 关/.test(text()) && app.querySelectorAll('[data-take]').length > 0,
+            text().slice(0, 60));
+          check('抽取页上写着还剩 1 次', /还剩 1 次/.test(text()), text().slice(0, 60));
+          /* 选一张卡 → 应当直接开下一关（第 2 关） */
+          guard('选一张奖励卡', () => app.querySelector('[data-take]').onclick());
+          check('抽完就直接开第 2 关（新的战斗界面）',
+            !!app.querySelector('#battleCanvas') && /第 2 关/.test(text()),
+            text().slice(0, 60));
+          check('第 2 关的战斗界面照样有开始闸门', !!app.querySelector('#btStart'));
+          env.runFrames(20);
+          check('第 2 关打起来不报错', !text().includes('页面没能启动'));
+        }
+      }
     }
   }
 }

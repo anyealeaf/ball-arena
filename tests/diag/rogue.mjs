@@ -5,7 +5,10 @@
      A. 规则（纯逻辑，不需要浏览器）：难度公式、敌人凑分、抽签去重、
         光附魔解锁、通关奖励、最高记录；
      B. 真打一关（引擎）：BOSS 的"除帧伤外伤害 +50%"、技能伤害 +5、
-        没绑按键的技能自动释放、玩家球的成长真的进了战斗配置。
+        没绑按键的技能自动释放、玩家球的成长真的进了战斗配置；
+     C. 敌人的攻击暗红化（引擎标记 + 渲染层真的用暗红画）；
+     D. 实时模式的弹道贴图预热（开局把全集预热掉）；
+     E. 玩家球继承技能自带的美术与资源条（弓 / 辉光领域 / 护盾条 / 魔力条）。
    用法：node tests/diag/rogue.mjs
    ============================================================ */
 
@@ -13,10 +16,56 @@ import '../lib/test-balls.mjs';
 import {
   SPECIES, SPECIES_BY_ID, PLAYABLE_SPECIES, DEFAULT_RULES, makeUnitStats, SCALE,
 } from '../../js/balls.js';
-import { getSkill } from '../../js/skills.js';
-import { Battle, mulberry32, LIGHT_ENCHANT_BONUS } from '../../js/core.js';
+import { getSkill, projSpriteSrcs } from '../../js/skills.js';
+import { Battle, mulberry32, LIGHT_ENCHANT_BONUS, PROJ_STRIDE, FIELD_STRIDE } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
+import { Renderer, HOSTILE_COLOR, HOSTILE_SPRITE_FILTER, preloadSprites, stickerPaths } from '../../js/render.js';
 import * as R from '../../js/rogue.js';
+
+/** 记录型 2D 上下文：把每一次绘制调用记下来，便于断言"真的画成了什么颜色" */
+function fakeCanvas() {
+  const calls = [];
+  const ctx = new Proxy({}, {
+    get(_t, prop) {
+      if (prop === 'calls') return calls;
+      if (prop === 'canvas') return { width: 720, height: 440, clientWidth: 720, clientHeight: 440 };
+      if (prop === 'createRadialGradient' || prop === 'createLinearGradient') {
+        return (...a) => { calls.push({ name: String(prop), a }); return { addColorStop() {} }; };
+      }
+      if (prop === 'measureText') return () => ({ width: 10 });
+      if (prop === 'getImageData') return () => ({ data: new Uint8ClampedArray(4) });
+      // 属性赋值（fillStyle / filter / globalAlpha…）也记下来
+      return (...a) => { calls.push({ name: String(prop), a }); };
+    },
+    set(_t, prop, value) {
+      calls.push({ name: String(prop), value });
+      /* fillStyle / strokeStyle 同时记在 fill / stroke 两个键上，
+         这样断言"某个颜色被用过"不用猜是哪一类。 */
+      if (prop === 'fillStyle') calls[calls.length - 1].fill = value;
+      if (prop === 'strokeStyle') calls[calls.length - 1].stroke = value;
+      return true;
+    },
+  });
+  return {
+    width: 720, height: 440, clientWidth: 720, clientHeight: 440,
+    style: {},                 // Renderer.resize() 会往 style 上写尺寸
+    getContext: () => ctx,
+  };
+}
+
+/* 渲染层读 window.devicePixelRatio（这个测试没有浏览器环境，补一个最小值） */
+if (typeof globalThis.window === 'undefined') {
+  globalThis.window = { devicePixelRatio: 1, performance: globalThis.performance };
+}
+/* 假的 Image：不装它的话贴图弹道整条分支会被跳过（渲染层"没加载好就宁可不画"），
+   也就量不到"敌人的贴图被染成暗红"这件事。 */
+if (typeof globalThis.Image === 'undefined') {
+  globalThis.Image = class {
+    constructor() { this.width = 64; this.height = 64; this.naturalWidth = 64; this.naturalHeight = 64; }
+    set src(v) { this._src = v; if (this.onload) this.onload(); }
+    get src() { return this._src; }
+  };
+}
 
 let pass = 0, fail = 0;
 const log = [];
@@ -357,6 +406,212 @@ console.log('\n【B5】没绑按键的技能自动释放');
   const tags = new Set(halfBound.events.filter(e => e.type === 'shoot').map(e => e.tag));
   check('只绑了一个：绑的那个等按键、没绑的那个自己放',
     !tags.has('modan') && tags.has('cannon'), [...tags].join('、') || '（没有弹道）');
+}
+
+console.log('\n【B6】敌人的攻击特效显示为暗红色');
+{
+  /* 引擎侧：敌人的单位带 hostileLook，它放出来的弹道 / 场地物件在快照里
+     带"敌对"标记。渲染侧：程序化弹道换成暗红、贴图弹道用 filter 染成暗红。 */
+  const cfg = R.buildLevelConfig(R.newRun(['yuncai']), R.rollLevel(1, mulberry32(3)));
+  check('关卡里所有敌人单位都带 hostileLook',
+    cfg.teams[1].units.every(u => u.stats.hostileLook === true),
+    `${cfg.teams[1].units.length} 个敌人`);
+  check('玩家球**不带** hostileLook（自己的攻击保留原色）',
+    !cfg.teams[0].units[0].stats.hostileLook);
+
+  const b = new Battle({ ...cfg, seed: 7, rules: { ...cfg.rules, playerControl: false } });
+  const foe = b.units.find(u => u.hostileLook);
+  check('引擎把 hostileLook 带到了单位上', !!foe, foe ? foe.name : '没有带标记的单位');
+  if (foe) {
+    /* 直接放一发（不走冷却），确认它进快照时带标记 */
+    const target = b.units[0];
+    b._spawnProjectile({
+      kind: 'aura', tag: 'npc_bolt', owner: foe,
+      x: foe.x, y: foe.y, vx: 400 * SCALE / SCALE * SCALE, vy: 0,
+      damage: 50, radius: Math.round(5 * SCALE), life: 4, color: '#c084fc',
+    });
+    b._spawnField({
+      kind: 'mote', owner: foe, x: foe.x, y: foe.y, r: 3, life: 130,
+    });
+    b.step();
+    const snap = b.snapshots[b.snapshots.length - 1];
+    const n = snap.proj.length / PROJ_STRIDE;
+    let marked = 0;
+    for (let i = 0; i < n; i++) if (snap.proj[i * PROJ_STRIDE + 11] > 0.5) marked++;
+    check('敌人放出的弹道在快照里带"敌对"标记', marked > 0, `${marked} / ${n} 枚`);
+    const fn = snap.fields.length / FIELD_STRIDE;
+    let fmarked = 0;
+    for (let i = 0; i < fn; i++) if (snap.fields[i * FIELD_STRIDE + 9] > 0.5) fmarked++;
+    check('敌人放出的场地物件（质点/细线/光门）也带"敌对"标记', fmarked > 0,
+      `${fmarked} / ${fn} 个`);
+    /* 玩家自己的弹道不该被误标 */
+    const mine = b.units.find(u => !u.hostileLook);
+    b._spawnProjectile({
+      kind: 'aura', tag: 'modan', owner: mine,
+      x: mine.x, y: mine.y, vx: 500 * SCALE, vy: 0,
+      damage: 75, radius: Math.round(6 * SCALE), life: 4, color: '#5b21b6',
+    });
+    b.step();
+    const snap2 = b.snapshots[b.snapshots.length - 1];
+    const n2 = snap2.proj.length / PROJ_STRIDE;
+    let mineMarked = 0;
+    for (let i = 0; i < n2; i++) if (snap2.proj[i * PROJ_STRIDE + 11] > 0.5) mineMarked++;
+    check('玩家自己的弹道不会被标成敌对（标记是按"谁放的"来的）',
+      mineMarked === marked, `敌方 ${marked} / 全部 ${mineMarked}`);
+  }
+
+  /* 渲染侧：拿记录型上下文看"真的画成了暗红" */
+  const rcfg = R.buildLevelConfig(R.newRun(['yuncai']), R.rollLevel(1, mulberry32(3)));
+  const rb = new Battle({ ...rcfg, seed: 7, rules: { ...rcfg.rules, playerControl: false } });
+  const rfoe = rb.units.find(u => u.hostileLook);
+  rb._spawnProjectile({
+    kind: 'aura', tag: 'npc_bolt', owner: rfoe,
+    x: rfoe.x, y: rfoe.y, vx: 400 * SCALE, vy: 0,
+    damage: 50, radius: Math.round(5 * SCALE), life: 4, color: '#c084fc',
+  });
+  rb.step();
+  const rd = new Renderer(fakeCanvas());
+  const ctx = rd.ctx;
+  ctx.calls = [];
+  rd.draw(rb, rb.snapshots.length - 1);
+  const hostileStrokes = ctx.calls.filter(c =>
+    (c.fill === HOSTILE_COLOR || c.stroke === HOSTILE_COLOR)).length;
+  check(`敌人的程序化弹道用暗红 ${HOSTILE_COLOR} 画（不再用技能原本的紫色）`,
+    hostileStrokes > 0, `${hostileStrokes} 笔暗红`);
+  /* 贴图弹道：拿一个挂了贴图的敌人弹道，确认绘制时上了 filter */
+  const rfoe2 = rb.units.find(u => u.hostileLook);
+  rb._spawnProjectile({
+    kind: 'aura', tag: 'bat', owner: rfoe2,
+    x: rfoe2.x, y: rfoe2.y, vx: 200 * SCALE, vy: 0,
+    damage: 6, radius: Math.round(4 * SCALE), life: 4, color: '#a21caf',
+    sprite: 'assets/characters/tina_bat.png', spriteLen: 8.5, spriteGlow: '#dc2626',
+  });
+  rb.step();
+  ctx.calls = [];
+  rd.draw(rb, rb.snapshots.length - 1);
+  const filters = ctx.calls.filter(c => c.name === 'filter' && c.value === HOSTILE_SPRITE_FILTER);
+  check('敌人的**贴图**弹道会被染成暗红（canvas filter）', filters.length > 0,
+    `${filters.length} 次 filter`);
+  /* 反过来：玩家自己的**贴图**弹道不该被染 */
+  {
+    const cfg2 = R.buildLevelConfig(R.newRun(['yuncai']), R.rollLevel(1, mulberry32(3)));
+    const b2 = new Battle({ ...cfg2, seed: 9, rules: { ...cfg2.rules, playerControl: false } });
+    const hero = b2.units[0];
+    b2._spawnProjectile({
+      kind: 'aura', tag: 'modan', owner: hero,
+      x: hero.x, y: hero.y, vx: 500 * SCALE, vy: 0,
+      damage: 75, radius: Math.round(6 * SCALE), life: 4, color: '#5b21b6',
+      sprite: 'assets/characters/yuncai_bolt.png', spriteLen: 12, spriteGlow: '#c084fc',
+    });
+    b2.step();
+    const rd2 = new Renderer(fakeCanvas());
+    rd2.ctx.calls = [];
+    rd2.draw(b2, b2.snapshots.length - 1);
+    const bad = rd2.ctx.calls.filter(c => c.name === 'filter' && c.value === HOSTILE_SPRITE_FILTER);
+    check('玩家自己的贴图弹道不会被染成暗红', bad.length === 0, `${bad.length} 次 filter`);
+  }
+}
+
+/* ============================================================
+   D. 实时模式的弹道贴图预热
+   ------------------------------------------------------------
+   实时模式（闯关是实时的）开战那一刻还没有任何弹道，"调色板长出来再补"
+   必然晚一帧 —— 而渲染层对没就绪的贴图是"宁可不画"，那一帧就是空的
+   （现象 = "第一发没有特效"）。所以开局要扫技能参数表把全集预热掉。
+   ============================================================ */
+console.log('\n【D】实时模式：开局就把弹道贴图预热掉');
+{
+  const srcs = projSpriteSrcs();
+  check('扫技能参数表能拿到弹道贴图清单（不是手写的一份）',
+    srcs.length >= 4, `${srcs.length} 张：${srcs.join(' / ').slice(0, 90)}`);
+  for (const p of ['assets/characters/yuncai_bolt.png', 'assets/characters/taoyao_arrow.png',
+    'assets/characters/tina_bat.png']) {
+    check(`清单里有 ${p}`, srcs.includes(p));
+  }
+  /* preloadSprites 走的就是渲染层的贴图缓存（getSticker）：登记过 = 已经在加载 */
+  const before = stickerPaths().length;
+  preloadSprites(srcs);
+  const after = stickerPaths();
+  check('preloadSprites 之后，这些贴图都进了缓存（= 已经在加载）',
+    srcs.every(s => after.includes(s)),
+    `缓存 ${before} → ${after.length} 张，清单 ${srcs.length} 张`);
+}
+
+/* ============================================================
+   E. 玩家球"继承"技能自带的美术与资源条
+   ------------------------------------------------------------
+   作者报的"闯关里有部分特效丢失"根因之一：玩家球是一颗**技能池宿主**，
+   球种上什么美术/资源都没有（hero 的 bow / domain / resource 全是 null），
+   而技能带来的不只是机制 —— 桃夭的映霞要靠弓画拉弓与搭箭（箭长按弓估）、
+   晕彩的辉光领域要靠 domain 拿背景层、见晴的护盾与缇娜的魔力是资源条。
+   少了这些，机制照跑但**画面上什么都没有**。
+   ============================================================ */
+console.log('\n【E】玩家球继承技能自带的美术与资源条');
+{
+  const mkHero = (skills) => {
+    const run = R.newRun(['yuncai']);
+    run.skills = skills.slice();
+    const spec = R.rollLevel(1, mulberry32(1));
+    const cfg = R.buildLevelConfig(run, spec);
+    return cfg.teams[0].units[0].stats;
+  };
+  const taoyao = SPECIES_BY_ID.taoyao;
+  const yuncaiSp = SPECIES_BY_ID.yuncai;
+  const jianqing = SPECIES_BY_ID.jianqing;
+  const tina = SPECIES_BY_ID.tina;
+
+  check('抽到桃夭的箭 → 玩家球拿到弓（拉弓动作与箭长都要它）',
+    (() => { const s = mkHero(['taoyao_rong']); return !!s.bow && s.bow === taoyao.bow; })());
+  check('抽到晕彩的辉光领域 → 玩家球拿到领域背景层配置',
+    (() => { const s = mkHero(['yuncai_domain']); return !!s.domain; })());
+  check('抽到见晴① → 玩家球拿到水镜护盾条（上限 300）',
+    (() => { const s = mkHero(['jianqing_mirror_def']); return s.resource && s.resource.id === 'mirror' && s.resource.max === 300; })(),
+    (mkHero(['jianqing_mirror_def']).resource || {}).id || '没有资源条');
+  check('抽到缇娜② → 玩家球拿到魔力条（上限 5，偷学才可能触发）',
+    (() => { const s = mkHero(['tina_bat']); return s.resource && s.resource.id === 'mana' && s.resource.max === 5; })());
+  check('没抽到要用资源的技能就不乱挂资源条（见晴④ 不需要护盾条）',
+    (() => { const s = mkHero(['jianqing_takeoff']); return !s.resource; })());
+  check('两个球种的资源技能都抽到时，按抽取顺序先到先得（一条资源条）',
+    (() => {
+      const a = mkHero(['tina_bat', 'jianqing_mirror_def']).resource;
+      const b = mkHero(['jianqing_mirror_def', 'tina_bat']).resource;
+      return a.id === 'mana' && b.id === 'mirror';
+    })(),
+    (() => `${mkHero(['tina_bat', 'jianqing_mirror_def']).resource.id} / ${mkHero(['jianqing_mirror_def', 'tina_bat']).resource.id}`)());
+  check('继承的弓 / 领域 / 护盾条都是"原球种那一份"（不复制出新对象）',
+    mkHero(['taoyao_rong']).bow === taoyao.bow &&
+    mkHero(['yuncai_domain']).domain === yuncaiSp.domain &&
+    mkHero(['jianqing_mirror_def']).resource.max === jianqing.resource.max &&
+    mkHero(['tina_bat']).resource.max === tina.resource.max);
+
+  /* 真打一关：这些字段要真的生效（不是只挂在配置上） */
+  {
+    const run = R.newRun(['yuncai', 'taoyao', 'jianqing']);
+    run.skills = ['taoyao_rong', 'yuncai_domain', 'jianqing_mirror_def'];
+    const b = new Battle({
+      ...R.buildLevelConfig(run, R.rollLevel(1, mulberry32(2))),
+      seed: 5, rules: { ...R.buildLevelConfig(run, R.rollLevel(1, mulberry32(2))).rules, playerControl: false },
+    });
+    const hero = b.units[0];
+    check('辉光领域真的开始展开（auroraStyle 不为空，渲染层才会画极光）',
+      !!b.auroraStyle, b.auroraStyle ? '有背景层配置' : '没有（画不出一层）');
+    check('水镜护盾条能吃资源（_gainResource 不再是 0）',
+      b._gainResource(hero, 40) === 40 && hero.res === 40, `res=${hero.res}`);
+    /* 箭长：有弓时按"弓高 × 箭长比例"算，不是渲染层的兜底值 */
+    run.skills = ['taoyao_rong'];
+    const b2 = new Battle({
+      ...R.buildLevelConfig(run, R.rollLevel(1, mulberry32(2))),
+      seed: 6, rules: { ...R.buildLevelConfig(run, R.rollLevel(1, mulberry32(2))).rules, playerControl: false },
+    });
+    b2.units[0].skillCd.taoyao_rong = 0;
+    for (let i = 0; i < 400 && !b2.projectiles.some(p => p.tag === 'arrow'); i++) b2.step();
+    const arrow = b2.projectiles.find(p => p.tag === 'arrow');
+    const sprEntry = arrow ? (b2.projSpritePalette[arrow.spriteIdx] || null) : null;
+    const art = SPECIES_BY_ID.taoyao.bow.arts[0] || SPECIES_BY_ID.taoyao.bow;
+    check('玩家球射出的箭长度按弓算（不是 0，也不是渲染层兜底的 r×6）',
+      !!sprEntry && Math.abs(sprEntry.len - art.bowH * art.arrowLenFrac) < 0.6,
+      sprEntry ? `len=${sprEntry.len}（弓算出来 ${(art.bowH * art.arrowLenFrac).toFixed(1)}）` : '没有箭');
+  }
 }
 
 console.log('\n' + log.join('\n'));

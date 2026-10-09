@@ -13,47 +13,17 @@ import {
 import { getSkill, skillDesc, resolveLoadout, conflictsWithChosen, manualSkillIds } from './skills.js';
 import {
   getSkillDetail, setSkillDetail, onPrefsChange, getDetailOpen, setDetailOpen,
-  getPlayerKeys, setPlayerKeys, keyLabel, DEFAULT_PLAYER_KEYS, MAX_PLAYER_KEYS,
 } from './prefs.js';
 import { ARENAS, ARENA_BY_ID, zoneLabel, effectLabels } from './arenas.js';
 import { sketchArena, sketchBall } from './sketch.js';
+import { bindKbCapture, cancelKeyCapture, drawKeybindEditor } from './keybind.js';
 
 const STORAGE_KEY = 'ballBattle.prepare.v1';
 
 /* ---------- 玩家按键的"按下新键"捕捉 ----------
-   放在**模块级**、监听只注册一次。为什么不能写在 renderPrepare 里：
-   route() 每次切界面都会重跑 renderPrepare，渲染一次就注册一对 window 监听的话，
-   来回切几趟就会积一堆 —— 按一下键会连改好几个键位（第一版就是这么写的）。
-   另外监听里必须确认"那个键位列表还在页面上"（isConnected）：
-   切到战斗界面之后残留的捕捉状态不该再吞键盘事件。 */
-const kbCapture = { at: null, host: null, apply: null };
-let kbBound = false;
-
-function kbHandle(code, ev) {
-  if (kbCapture.at == null) return false;
-  /* "那个键位列表还在树上吗"：用 parentNode 判，不用 isConnected ——
-     准备界面整体渲染在一个容器里，容器本身**未必挂在 document 上**
-     （诊断脚本就是拿一个游离的 div 渲染的），用 isConnected 会把正常的
-     改键操作一起挡掉。换成"有没有被重新渲染掉"这个真正要防的情况：
-     重绘之后旧节点会从父节点上摘下来，parentNode 变成 null。 */
-  if (!kbCapture.host || !kbCapture.host.parentNode) { kbCapture.at = null; return false; }
-  ev.preventDefault();
-  ev.stopPropagation();
-  const apply = kbCapture.apply;
-  const at = kbCapture.at;
-  kbCapture.at = null;
-  if (apply) apply(code === 'Escape' ? null : code, at);
-  return true;
-}
-
-function bindKbCapture() {
-  if (kbBound) return;
-  kbBound = true;
-  window.addEventListener('keydown', e => { kbHandle(e.code, e); }, true);
-  window.addEventListener('mousedown', e => { kbHandle('Mouse' + e.button, e); }, true);
-  /* 右键要顺手挡掉系统菜单，否则绑完右键会弹出上下文菜单 */
-  window.addEventListener('contextmenu', e => { if (kbCapture.at != null) e.preventDefault(); }, true);
-}
+   实现在 keybind.js（准备界面与战斗界面的「按键设置」共用同一份捕捉逻辑 +
+   同一张键位表；两处各写一份的下场是"一边能绑、一边绑了不生效"）。
+   这里只留一个"切界面时把捕捉状态清掉"的动作。 */
 
 /* 每个队伍最多 / 最少放几个小球 */
 const MIN_PER_TEAM = 1;
@@ -63,7 +33,7 @@ export function renderPrepare(root, onStart) {
   /* ---------- 状态 ---------- */
   /* 上一次渲染留下的"正在改键"状态要清掉：重绘之后那个键位已经不在了，
      留着它会让下一次按键莫名其妙地改到一个看不见的键位上。 */
-  kbCapture.at = null;
+  cancelKeyCapture();
   const saved = loadSaved();
   // 首个球种非测试球时，说明是旧结构的存档，直接弃用，避免读到不兼容的数据
   const savedLooksValid = saved && Array.isArray(saved.species)
@@ -789,78 +759,10 @@ export function renderPrepare(root, onStart) {
     return 0;
   }
 
-  /** 正在等待"按下新键"的那个键位下标（存在模块级的 kbCapture 里） */
-  const capturing = () => kbCapture.at;
-
+  /** 键位面板：内容与交互都在 keybind.js（战斗界面的「按键设置」用的是同一份），
+   *  这里只负责"告诉它这个球有哪些主动技能"。 */
   function drawKeybinds() {
-    const host = rulesHost.querySelector('#keybindList');
-    if (!host) return;
-    const keys = getPlayerKeys();
-    const pu = currentPlayerUnit();
-    const manual = manualSkillIds(pu);
-    const bound = Math.max(keys.length, manual.length);
-    const cap = capturing();
-
-    host.innerHTML = Array.from({ length: bound }, (_, i) => `
-      <span class="keybind-row">
-        <button class="btn sm kb-key${cap === i ? ' capturing' : ''}" data-kb="${i}" type="button">
-          ${cap === i ? '按下新键…' : keyLabel(keys[i])}
-        </button>
-        ${bound > 1 ? `<button class="kb-del" data-kbdel="${i}" type="button" title="删掉这个键位">×</button>` : ''}
-      </span>`).join('');
-
-    const map = rulesHost.querySelector('#keybindMap');
-    if (map) {
-      if (!manual.length) {
-        map.innerHTML = `<span class="kb-slot">这个球没有主动技能 —— 所有技能都是被动/形态类，全自动触发，不需要按键。</span>`;
-      } else {
-        map.innerHTML = manual.map((id, i) => {
-          const sk = getSkill(id);
-          const label = keys[i] ? `<span class="kbd">${keyLabel(keys[i])}</span>` : '<span class="kb-none">未绑定</span>';
-          return `${label} → ${sk ? sk.name : id}`;
-        }).join('　·　')
-          + (manual.length > keys.length
-            ? `<br><span class="kb-none">有 ${manual.length - keys.length} 个主动技能没有按键 —— 点「＋ 添加按键」补上。</span>`
-            : '');
-      }
-    }
-
-    /* 捕捉的落点交给模块级的监听（见 kbHandle）：它把"按下的键 + 哪个键位"传回来 */
-    kbCapture.host = host;
-    kbCapture.apply = (code, at) => {
-      if (code && at != null) {
-        const list = getPlayerKeys();
-        while (list.length <= at) list.push('');
-        list[at] = code;
-        setPlayerKeys(list);
-      }
-      drawKeybinds();     // code = null（按了 Esc）时只是把界面恢复成"未在捕捉"
-    };
-
-    host.querySelectorAll('[data-kb]').forEach(btn => {
-      btn.onclick = () => { kbCapture.at = Number(btn.dataset.kb); drawKeybinds(); };
-    });
-    host.querySelectorAll('[data-kbdel]').forEach(btn => {
-      btn.onclick = () => {
-        const i = Number(btn.dataset.kbdel);
-        setPlayerKeys(getPlayerKeys().filter((_, k) => k !== i));
-        kbCapture.at = null;
-        drawKeybinds();
-      };
-    });
-    const add = rulesHost.querySelector('#kbAdd');
-    if (add) add.onclick = () => {
-      const cur = getPlayerKeys();
-      if (cur.length >= MAX_PLAYER_KEYS) return;
-      setPlayerKeys([...cur, '']);
-      drawKeybinds();
-    };
-    const reset = rulesHost.querySelector('#kbReset');
-    if (reset) reset.onclick = () => {
-      setPlayerKeys(DEFAULT_PLAYER_KEYS.slice());
-      kbCapture.at = null;
-      drawKeybinds();
-    };
+    drawKeybindEditor(rulesHost, manualSkillIds(currentPlayerUnit()), null);
   }
 
   /** 列出所有将参战的小球（用于"选择我操控哪个"） */
