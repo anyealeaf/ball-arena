@@ -4,6 +4,7 @@
 
 import { renderCodex } from './ui-codex.js';
 import { renderPrepare } from './ui-prepare.js';
+import { renderRogue } from './ui-rogue.js';
 import { renderBattle } from './ui-battle.js';
 import { installLiveReload } from './live-reload.js';
 
@@ -84,6 +85,12 @@ const MENU = [
     desc: '设置队伍数量、场地、参与小球与特殊规则。开战之后就不再干预，所以配置决定胜负。'
   },
   {
+    hash: '#/rogue',
+    ic: '🗺️',
+    title: '闯关肉鸽',
+    desc: '选三个小球合成技能池，每次过关都变强：逐关加难度、每 5 关一个 BOSS，记录最高闯关数。'
+  },
+  {
     /* 单开一个页面（不是哈希路由里的界面）：它不参与战斗流程，
        只是调素材与数值的工具，改完写回 js/*.js。 */
     href: 'assets-editor.html',
@@ -139,6 +146,8 @@ function route() {
 
   if (h.startsWith('#/codex')) {
     renderCodex(root);
+  } else if (h.startsWith('#/rogue')) {
+    renderRogue(root, () => { location.hash = '#/'; });
   } else if (h.startsWith('#/prepare')) {
     renderPrepare(root, cfg => {
       pendingConfig = cfg;

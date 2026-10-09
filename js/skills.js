@@ -86,6 +86,67 @@ export const SKILL_PARAMS = {
 export const CHARGE_FRAMES = Math.round(SKILL_PARAMS.dash.chargeTime / DT);
 export const DASH_FRAMES = Math.round(SKILL_PARAMS.dash.dashTime / DT);
 
+/* ============================================================
+   闯关肉鸽 · 敌人的两套"魔弹"（作者 2026-10 给的数值）
+   ------------------------------------------------------------
+   两张表共用一个发射函数：小怪/精英的差别只有伤害、弹速与间隔。
+   它们和玩家的技能走同一条路（冷却触发 + `_spawnProjectile`），
+   所以撞墙、被见晴的长剑消掉、被裁光的细线吸收这些交互全都天然成立。
+   美术：**没有贴图**，就是程序化光点（它们是关卡杂兵，不值得再配图）。
+   ============================================================ */
+export const ROGUE_BOLTS = {
+  bolt50: { name: '魔弹', cd: 2, damage: 50, speed: 400, r: 5, life: 4, color: '#c084fc' },
+  bolt100: { name: '魔弹', cd: 1, damage: 100, speed: 550, r: 6, life: 4, color: '#f472b6' },
+};
+
+function fireBolt(battle, unit, target, P) {
+  const dx = target.x - unit.x, dy = target.y - unit.y;
+  const d = Math.hypot(dx, dy) || 1;
+  const spd = P.speed * SCALE;
+  battle._spawnProjectile({
+    kind: 'aura', tag: 'npc_bolt', owner: unit,
+    x: unit.x, y: unit.y,
+    vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
+    damage: battle._scaledDamage(unit, P.damage),
+    radius: Math.round(P.r * SCALE),
+    life: P.life, color: P.color,
+  });
+}
+
+/** 每 2 秒一个 50 伤害 / 400 弹速的魔弹（NPC11 / NPC22） */
+export const SKILL_NPC_BOLT50 = {
+  id: 'npc_bolt50',
+  name: '魔弹',
+  desc: `每 ${ROGUE_BOLTS.bolt50.cd} 秒发射一个 ${ROGUE_BOLTS.bolt50.damage} 伤害、` +
+        `${ROGUE_BOLTS.bolt50.speed} 弹速的魔弹。`,
+  descDetail: `每 ${ROGUE_BOLTS.bolt50.cd} 秒瞄准最近的敌人发射一枚魔弹：` +
+        `伤害 ${ROGUE_BOLTS.bolt50.damage}、弹速 ${ROGUE_BOLTS.bolt50.speed}、没有贴图（程序化光点）。`,
+  trigger: { type: 'cooldown', cd: ROGUE_BOLTS.bolt50.cd },
+  run(ctx) {
+    const { battle, unit, target } = ctx;
+    if (!target) return false;
+    fireBolt(battle, unit, target, ROGUE_BOLTS.bolt50);
+    return true;
+  },
+};
+
+/** 每 1 秒一个 100 伤害 / 550 弹速的魔弹（NPC21） */
+export const SKILL_NPC_BOLT100 = {
+  id: 'npc_bolt100',
+  name: '魔弹',
+  desc: `每 ${ROGUE_BOLTS.bolt100.cd} 秒发射一个 ${ROGUE_BOLTS.bolt100.damage} 伤害、` +
+        `${ROGUE_BOLTS.bolt100.speed} 弹速的魔弹。`,
+  descDetail: `每 ${ROGUE_BOLTS.bolt100.cd} 秒瞄准最近的敌人发射一枚魔弹：` +
+        `伤害 ${ROGUE_BOLTS.bolt100.damage}、弹速 ${ROGUE_BOLTS.bolt100.speed}。`,
+  trigger: { type: 'cooldown', cd: ROGUE_BOLTS.bolt100.cd },
+  run(ctx) {
+    const { battle, unit, target } = ctx;
+    if (!target) return false;
+    fireBolt(battle, unit, target, ROGUE_BOLTS.bolt100);
+    return true;
+  },
+};
+
 /* ------------------------------------------------------------
    技能一：每隔 2.5 秒自动瞄准对手发射一个 50 攻击力的特效小球
    ------------------------------------------------------------ */
@@ -1908,10 +1969,18 @@ export const SKILL_MIRROR_SWORD = {
       unit.flags.swordDefCd = Math.max(0, (unit.flags.swordDefCd || 0) - DT);
       if (!(unit.swordLen > 0)) return;
 
-      /* 扇形：以**移动方向**为中心。速度几乎为 0（蓄力/贴墙）时用 face 兜底。 */
-      const moving = Math.hypot(unit.vx, unit.vy) > 1;
-      const dir = moving ? Math.atan2(unit.vy, unit.vx)
+      /* 长剑**始终朝向锁定的敌人**（作者 2026-10 的修改）。
+         以前是"以移动方向为中心"，站着不动时剑会僵在最后一次的朝向上 ——
+         现在改成每帧朝向 `_nearestEnemy` 算出来的角度：
+           · `inCone` 的扇形中心也跟着它，所以"够不够得着"变成纯距离判定
+             （剑一直对着敌人，方向不再需要玩家考虑）；
+           · 这个角度同时写进快照第 19 位，渲染层画平时那柄剑时用它；
+           · 没有敌人时退回上一次的朝向（face），不会突然甩到右边。 */
+      const foe = battle._nearestEnemy(unit);
+      const dir = foe
+        ? Math.atan2(foe.y - unit.y, foe.x - unit.x)
         : ((unit.face ?? 0) * Math.PI) / 180;
+      unit.swordAngle = ((dir * 180) / Math.PI + 360) % 360;
       const half = (P.frontDeg / 2) * Math.PI / 180;
       /* 够得着：球心距 ≤ 自身半径 + 剑长 + 对方半径（"剑尖扫到"的判定）。
          ⚠ 单位：目标位置与 unit.x/y、unit.r 都是**定点数**（×SCALE），
@@ -2392,6 +2461,9 @@ export const SKILLS = {
   [SKILL_AIM.id]: SKILL_AIM,
   [SKILL_CHUNJING.id]: SKILL_CHUNJING,
   [SKILL_TOP.id]: SKILL_TOP,
+  /* 闯关肉鸽 · 敌人的魔弹 */
+  [SKILL_NPC_BOLT50.id]: SKILL_NPC_BOLT50,
+  [SKILL_NPC_BOLT100.id]: SKILL_NPC_BOLT100,
   /* 见晴（白水仙） */
   [SKILL_MIRROR_DEF.id]: SKILL_MIRROR_DEF,
   [SKILL_MIRROR_SWORD.id]: SKILL_MIRROR_SWORD,

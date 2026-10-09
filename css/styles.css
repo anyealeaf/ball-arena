@@ -445,6 +445,39 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 .guard-hint[hidden] { display: none; }
 
+/* ---------- 闯关肉鸽 ---------- */
+.rg-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+.rg-card {
+  text-align: left; font: inherit; cursor: pointer;
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--paper); border: 1px solid var(--line);
+  color: var(--ink);
+}
+.rg-card:hover { background: var(--paper2); }
+.rg-card.on {
+  border-color: var(--accent, #b58b2a);
+  box-shadow: 0 0 0 2px rgba(217, 164, 65, .20);
+}
+.rg-card.ench { border-style: dashed; border-color: #b58b2a; }
+.rg-card .rg-name { font-weight: 700; margin-bottom: 4px; }
+.rg-card[disabled] { opacity: .5; cursor: default; }
+.rg-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.rg-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; font-size: 12px;
+  background: var(--paper2); border: 1px solid var(--line2);
+}
+.rg-tag .rg-light {
+  font-style: normal; font-size: 10.5px; padding: 0 4px; border-radius: 999px;
+  background: #fde68a; color: #7c5a11;
+}
+.rg-boss { color: var(--bad); }
+.separator { border-top: 1px solid var(--line2); margin: 12px 0; }
+.rg-enemies { margin: 4px 0 0 18px; padding: 0; font-size: 12.5px; line-height: 1.7; }
+
 /* ---------- 「斗蛐蛐开始」遮罩 ----------
    进战斗界面先不跑：等玩家点按钮才真正开打（作者 2026-10 的要求）。
    和抽签层一样：默认 display:none，加 .show 才出现 ——

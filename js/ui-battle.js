@@ -16,10 +16,18 @@ import { getSkill, manualSkillIds } from './skills.js';
 import { ARENA_BY_ID, zoneLabel } from './arenas.js';
 import { nextSeed } from './main.js';
 
-export function renderBattle(root, cfg, onExit) {
+export function renderBattle(root, cfg, onExit, opts = {}) {
   /* ---------- 1) 建局 ---------- */
   const seed = nextSeed();
   const battle = new Battle({ ...cfg, seed });
+  /* 闯关肉鸽会传这一组：标题/副标题（第几关、难度、场地）、隐藏"换种子重开"
+     （那个按钮在关卡里没有意义 —— 换的是种子不是关卡）、退出按钮文案、
+     以及"这一局打完了"的回调（用来判定过关还是阵亡）。 */
+  const title = opts.title || '';
+  const subtitle = opts.subtitle || '';
+  const hideAgain = !!opts.hideAgain;
+  const exitLabel = opts.exitLabel || '重新准备';
+  const onEnd = typeof opts.onEnd === 'function' ? opts.onEnd : null;
 
   /* 玩家操控 = **实时推进**（作者 2026-10 的玩家操控功能）。
      为什么不沿用"开局一次性算完整局"：那一套要求提前知道玩家的每一次操作，
@@ -77,12 +85,14 @@ export function renderBattle(root, cfg, onExit) {
 
   root.innerHTML = `
     <div class="topbar">
-      <div class="brand">斗蛐蛐<small>${cfg.teams.length} 方 · ${battle.units.length} 球 · ${arena.name}${
+      <div class="brand">${title || '斗蛐蛐'}<small>${
+        subtitle ? subtitle + ' · ' : ''
+      }${cfg.teams.length} 方 · ${battle.units.length} 球 · ${arena.name}${
         (battle.sizeScale ?? 1) !== 1 ? `（场地 ${Math.round(battle.sizeScale * 100)}%）` : ''
       }</small></div>
       <div class="spacer"></div>
-      <button class="btn" id="btBack">重新准备</button>
-      <button class="btn" id="btAgain">换种子重开</button>
+      <button class="btn" id="btBack">${exitLabel}</button>
+      ${hideAgain ? '' : '<button class="btn" id="btAgain">换种子重开</button>'}
     </div>
 
     <div class="battle-wrap">
@@ -261,6 +271,9 @@ export function renderBattle(root, cfg, onExit) {
     }
     keysEdge.clear();      // 消费掉：一次"按下"至少喂给一帧
     const inp = { dx, dy, fire };
+    /* 已经绑了键的技能（界面的按键表）—— 引擎据此把"没绑键的技能"自动释放
+       （闯关肉鸽：技能数量无上限，绑不过来的那些交给 AI 自己放）。 */
+    inp.bound = manualIds.filter((id, i) => !!bindings[i]);
     if (aimWorld) { inp.aimX = aimWorld.x; inp.aimY = aimWorld.y; }
     return inp;
   }
@@ -470,16 +483,20 @@ export function renderBattle(root, cfg, onExit) {
       const ready = left <= 0;
       const cd = sk.trigger && sk.trigger.cd ? sk.trigger.cd : 0;
       const pct = cd > 0 ? Math.max(0, Math.min(1, 1 - left / cd)) : 1;
+      /* 没绑键的主动技能**会自动释放**（闯关肉鸽：技能数量无上限，绑不过来）——
+         所以键位那一格写"自动"，而不是"未绑定"（后者会被理解成"用不了"）。 */
       return `<span class="ch-slot${ready ? ' ready' : ''}${code ? '' : ' unbound'}">
-        <b class="ch-key">${code ? keyLabel(code) : '未绑定'}</b>
+        <b class="ch-key">${code ? keyLabel(code) : '自动'}</b>
         <span class="ch-name">${sk.name}</span>
         <i class="ch-cd">${ready ? '就绪' : left.toFixed(1) + 's'}</i>
         <span class="ch-fill" style="width:${(pct * 100).toFixed(0)}%"></span>
       </span>`;
     }).join('');
-    /* 自动触发的技能也列出来 —— 玩家得知道"这些不用按键" */
+    /* 自动触发的技能也列出来 —— 玩家得知道"这些不用按键"。
+       包括两类：本来就是被动/形态类的，以及**没绑到键**的主动技能（引擎会自动放）。 */
+    const boundIds = manualIds.filter((id, i) => !!bindings[i]);
     const autos = (playerUnit.skills || []).map(getSkill).filter(Boolean)
-      .filter(sk => !manualIds.includes(sk.id))
+      .filter(sk => !manualIds.includes(sk.id) || !boundIds.includes(sk.id))
       .map(sk => sk.name).join('　·　');
     const html = `<div class="ch-head">你操控：<b>${teamColor(playerUnit.team).name} #${playerUnit.slot % 100 + 1}</b>
       ${playerUnit.name} · 生命 <b>${hpNow}</b>/${playerUnit.maxHp}${
@@ -771,6 +788,8 @@ export function renderBattle(root, cfg, onExit) {
     if (simDone && ui.frame >= totalFrames) {
       if (ui.playing) { ui.playing = false; playBtn.textContent = '▶ 播放'; }
       drawResult();
+      /* 只通知一次（闯关模式靠它判定过关 / 阵亡） */
+      if (onEnd && !ui.endNotified) { ui.endNotified = true; onEnd(battle); }
     }
 
     requestAnimationFrame(loop);
@@ -808,9 +827,8 @@ export function renderBattle(root, cfg, onExit) {
   if (startBtn) startBtn.onclick = beginBattle;
 
   /* ---------- 10) 交互 ---------- */
-  root.querySelector('#btBack').onclick = () => onExit();
-  root.querySelector('#btAgain').onclick = () => onExit(true);
-
+  /* 第一处 #btBack/#btAgain 只是"早期绑定"？不 —— 这里就是唯一的绑定点；
+     上面第 822 行那处是旧代码留下的重复绑定，见下面 leave() 的说明。 */
   playBtn.onclick = () => {
     /* 还没开始：播放键不做事（开战只有「斗蛐蛐开始」那一个入口） */
     if (!ui.started) return;
@@ -1018,7 +1036,8 @@ export function renderBattle(root, cfg, onExit) {
     origExit(again);
   };
   root.querySelector('#btBack').onclick = () => leave(false);
-  root.querySelector('#btAgain').onclick = () => leave(true);
+  const againBtn = root.querySelector('#btAgain');
+  if (againBtn) againBtn.onclick = () => leave(true);   // 闯关模式里没有这个按钮
 
   /* ---------- 12) 启动 ---------- */
   /* 上一个战斗界面（例如"换种子重开"）先拆干净，再把这一个挂给路由当守门人 */

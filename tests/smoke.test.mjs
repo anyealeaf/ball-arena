@@ -1173,8 +1173,8 @@ console.log('\n【7】数据层');
   });
   check('映霞两式都声明了 aims + windup（引擎据此算瞄准角与拉弓进度）', aiming,
     '荣 / 枯');
-  check('SNAP_STRIDE 与文档一致（castP / aimAngle / castKind / 水镜两色 / 状态位各占一位）',
-    mods.core.SNAP_STRIDE === 19, String(mods.core.SNAP_STRIDE));
+  check('SNAP_STRIDE 与文档一致（castP / aimAngle / castKind / 水镜两色 / 状态位 / 长剑朝向各占一位）',
+    mods.core.SNAP_STRIDE === 20, String(mods.core.SNAP_STRIDE));
 
   /* ---------- 见晴（球种 4 · 白水仙） ---------- */
   const jq = SPECIES_BY_ID.jianqing;
@@ -1197,8 +1197,8 @@ console.log('\n【7】数据层');
     try { readFileSync(jq.sticker.src); return true; } catch { return false; }
   })(), jq.sticker ? jq.sticker.src : '-');
   /* 三个水镜必须各有自己的颜色状态：快照里给了两个颜色位 + 一个状态位 */
-  check('快照为"两面水镜同时开着"留了两个颜色位 + 一个状态位',
-    mods.core.SNAP_STRIDE === 19, String(mods.core.SNAP_STRIDE));
+  check('快照为"两面水镜同时开着"留了两个颜色位 + 一个状态位（后来又加了长剑朝向位）',
+    mods.core.SNAP_STRIDE === 20, String(mods.core.SNAP_STRIDE));
 
   /* ---------- 缇娜（球种 3） ---------- */
   const tn = SPECIES_BY_ID.tina;

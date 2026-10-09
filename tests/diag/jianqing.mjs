@@ -1,4 +1,4 @@
-﻿import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 /* ============================================================
    见晴（魔法少女[白水仙]）自检
    ------------------------------------------------------------
@@ -230,34 +230,52 @@ console.log('\n【②】水镜·魔力共鸣（猩红色）');
   check('过了 1 秒就会再砍（不是只砍一次）', evCount(b, 'swordSwing') > swings1,
     `${swings1} → ${evCount(b, 'swordSwing')} 次`);
 
-  /* 身后不算 */
+  /* 长剑**始终朝向锁定的敌人**（作者 2026-10 的修改）——
+     所以"背后/侧面"不再有盲区：只要够得着（剑长 + 双方半径）就会砍。
+     反过来，够不着就一定砍不到（判据从"方向"变成了"距离"）。 */
   const b2 = mk(['jianqing_mirror_sword']);
   const u2 = b2.units[0], t2 = b2.units[1];
-  u2.vx = Math.round(120 * SCALE); u2.vy = 0;
-  t2.x = u2.x - Math.round(60 * SCALE); t2.y = u2.y;    // 正后方
+  u2.vx = Math.round(120 * SCALE); u2.vy = 0;           // 朝 +x 移动
+  t2.x = u2.x - Math.round(60 * SCALE); t2.y = u2.y;    // 正后方（以前砍不到）
   b2.step();
-  check('正后方（120° 之外）不会被砍', evCount(b2, 'swordSwing') === 0,
-    `${evCount(b2, 'swordSwing')} 次`);
+  check('正后方的敌人照样会被砍（剑会转过去对着它）',
+    evCount(b2, 'swordSwing') === 1, `${evCount(b2, 'swordSwing')} 次`);
+  const snap2 = b2.snapshots[b2.snapshots.length - 1].data;
+  const swAng = snap2[u2.id * SNAP_STRIDE + 19];
+  check('快照里的长剑朝向 = 指向那个敌人（180°）',
+    Math.abs(swAng - 180) < 2, `${Number(swAng).toFixed(1)}°`);
 
-  /* 扇形中心是**移动方向**，不是"朝目标的方向" */
+  /* 够不着：超出"自身半径 + 剑长 + 对方半径"就一定不砍 */
+  const b6 = mk(['jianqing_mirror_sword']);
+  const u6 = b6.units[0], t6 = b6.units[1];
+  t6.x = u6.x + Math.round(400 * SCALE); t6.y = u6.y;
+  b6.step();
+  check('离得太远（超出剑尖）不会被砍', evCount(b6, 'swordSwing') === 0,
+    `${evCount(b6, 'swordSwing')} 次`);
+
+  /* 剑的方向**跟着敌人走**：她把敌人绕到哪边，剑就指哪边 */
   const b3 = mk(['jianqing_mirror_sword']);
   const u3 = b3.units[0], t3 = b3.units[1];
-  u3.vx = Math.round(120 * SCALE); u3.vy = 0;           // 朝 +x 移动
-  const a50 = (50 * Math.PI) / 180;                     // 偏 50°（< 60° 半角 → 在扇形内）
+  u3.vx = Math.round(120 * SCALE); u3.vy = 0;           // 自身朝 +x 移动
+  const a50 = (50 * Math.PI) / 180;
   t3.x = u3.x + Math.round(Math.cos(a50) * 60 * SCALE);
   t3.y = u3.y + Math.round(Math.sin(a50) * 60 * SCALE);
   b3.step();
-  check('目标在移动方向偏 50°：在 120° 扇形内 → 会被砍',
+  check('敌人在移动方向的偏 50°：够得着 → 会被砍',
     evCount(b3, 'swordSwing') === 1, `${evCount(b3, 'swordSwing')} 次`);
   const b4 = mk(['jianqing_mirror_sword']);
   const u4 = b4.units[0], t4 = b4.units[1];
   u4.vx = Math.round(120 * SCALE); u4.vy = 0;
-  const ang = (100 * Math.PI) / 180;                     // 偏 100°（> 60° 半角）
+  const ang = (100 * Math.PI) / 180;
   t4.x = u4.x + Math.round(Math.cos(ang) * 60 * SCALE);
   t4.y = u4.y + Math.round(Math.sin(ang) * 60 * SCALE);
   b4.step();
-  check('目标偏出 100°：扇形之外，不会被砍', evCount(b4, 'swordSwing') === 0,
-    `${evCount(b4, 'swordSwing')} 次`);
+  check('敌人在移动方向偏 100°：以前在扇形外，现在剑转过去照样砍',
+    evCount(b4, 'swordSwing') === 1, `${evCount(b4, 'swordSwing')} 次`);
+  const snap4 = b4.snapshots[b4.snapshots.length - 1].data;
+  check('长剑朝向精确指向那个敌人（100°）',
+    Math.abs(snap4[u4.id * SNAP_STRIDE + 19] - 100) < 2,
+    `${Number(snap4[u4.id * SNAP_STRIDE + 19]).toFixed(1)}°`);
 
   /* 防御性挥动：消除敌方魔弹（对手用木桩 —— 换成会开火的角色，
      它自己打出来的魔弹会混进计数里） */
@@ -890,7 +908,7 @@ console.log('\n【⑥】我很可爱');
 /* ---------- ⑦ 引擎契约（这轮为见晴加的东西） ---------- */
 console.log('\n【⑦】引擎契约（快照 / 免疫 / 穿透 / 帧伤）');
 {
-  check('快照步长扩到 19（新增水镜两色 + 状态位）', SNAP_STRIDE === 19, String(SNAP_STRIDE));
+  check('快照步长扩到 20（水镜两色 + 状态位 + 长剑朝向）', SNAP_STRIDE === 20, String(SNAP_STRIDE));
   const b = mk(['jianqing_mirror_def', 'jianqing_mirror_borrow'], { rules: { timeLimit: 0 } });
   b.step();
   const snap = b.snapshots[b.snapshots.length - 1];

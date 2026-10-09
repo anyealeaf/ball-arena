@@ -14,8 +14,16 @@ import { getSkill, SKILL_PARAMS, CHARGE_FRAMES, DASH_FRAMES, resolveLoadout } fr
 const TWO_PI = Math.PI * 2;
 
 /* 快照步长：渲染层按这两个常数解析快照，不要再写死数字。
-   改动这里就等于改动快照格式，所有读取方（render.js / ui-battle.js / 测试）会一起跟上。 */
-export const SNAP_STRIDE = 19;
+   改动这里就等于改动快照格式，所有读取方（render.js / ui-battle.js / 测试）会一起跟上。
+
+   单位步长 SNAP_STRIDE：
+     0 x  1 y  2 hp  3 alive  4 flash  5 res  6 face
+     7 mode(0 普通 / 1 蓄力 / 2 冲刺)  8 蓄力进度 0~1  9 冲刺进度 0~1
+     10 隐身中(0/1)  11 开华中(0/1)  12 旋转角(弧度)
+     13 施法进度 0~1  14 瞄准角(角度制)  15 施法变体
+     16 水镜色·防守  17 水镜色·借用  18 状态位(bit0 飞行中)
+     19 长剑朝向(角度制，指向锁定的敌人)                          */
+export const SNAP_STRIDE = 20;
 /* 弹道步长：
      0 x  1 y  2 r  3 剩余寿命比例 1~0  4 颜色下标  5 kind(0 特效 / 1 实体 / 2 光束)
      6 宽度  7 方向 x  8 方向 y  9 贴图下标(-1 = 无)  10 光束长度
@@ -60,6 +68,12 @@ export const SPIN_RATE_PER_STACK = 1.2;
    用来淡出"（渲染层本来就按 life/maxLife 做末端淡出，所以只要把寿命改短即可）。
    这几帧里它不再移动、也不再判命中/撞墙，所以不会重复结算伤害或重复出水花。 */
 export const PROJ_MIN_VISIBLE_FRAMES = 5;
+
+/* 光附魔（闯关肉鸽）给一次攻击加多少伤害。
+   与开华的"光"加成同一个量级（都是 +50），所以两处叠在一起时会变成 +100 ——
+   这是刻意的：光附魔是"给这个技能也附上光"，开华是"整体强化光"。
+   做法见 _runSkills 里的 lightTemp（只在被附魔技能出手的那一瞬生效）。 */
+export const LIGHT_ENCHANT_BONUS = 50;
 
 /* ---------- 玩家操控 ---------- */
 /** 玩家按住方向键后，多少秒把速度拉到"朝该方向、大小为球速"。
@@ -422,7 +436,9 @@ function buildUnits(config, rnd) {
         bow: st.bow || null,           // 手持物件（弓），与球体贴图分开绘制
         domain: st.domain || null,     // 辉光领域的背景层配置（只有晕彩有）
         maxHp: st.maxHp,
-        hp: st.maxHp,
+        /* 起始血量：默认满血。闯关肉鸽会传 st.hp 把"上一关剩下的血"带进来
+           （关与关之间血量是连续的，只有过关奖励才回血）。 */
+        hp: Math.max(1, Math.min(st.maxHp, st.hp ?? st.maxHp)),
         r: Math.round(st.r * SCALE),
         /* 质量按面积计（半径平方）。两球对撞时质量决定各自被弹开的程度，
            所以大球撞小球会把小球弹得更远，符合直觉。
@@ -546,6 +562,9 @@ function buildUnits(config, rnd) {
         /* 长剑长度（世界单位，0 = 没握剑）。渲染层直接读它画剑，
            精灵变身（⑤）会让它跟着体型一起减半 —— 改一处就够了。 */
         swordLen: 0,
+        /* 长剑朝向（角度制 0~360）：见晴②的剑**始终朝向锁定的敌人**，
+           由技能每帧写入、进快照第 19 位给渲染层画平时那一柄剑（作者 2026-10）。 */
+        swordAngle: 0,
         /* 被"羽毛"打出来的减益：见晴的技能⑥给**对方**挂上。
            penalty 是"它造成的伤害 -N"（帧伤不减，见 _damage）。 */
         meleePenalty: 0,
@@ -553,6 +572,18 @@ function buildUnits(config, rnd) {
         /* 吸附：{ targetId, untilFrame } —— 由技能写入，引擎负责把位置按在目标身上 */
         latch: null,
         damageMul: st.damageMul ?? 1,   // 伤害倍率（析光分身 = 1/3）
+        /* 攻击方的伤害倍率（闯关肉鸽的 BOSS = 1.5）。
+           与 damageMul 分开记的原因：damageMul 是"这个单位的伤害整体缩放"，
+           连帧伤一起算（析光分身的口径）；atkMul 是"除帧伤以外 +50%"，
+           由 _damage 在**非帧伤**那条路上乘 —— 两者语义不同，不能挤一个字段。 */
+        atkMul: st.atkMul ?? 1,
+        /* 技能伤害加成（闯关肉鸽的"+5 技能与碰撞伤害"里的技能那一份）。
+           碰撞那一份直接加在 melee 上，见 rogue.js 的 buildLevelConfig。 */
+        skillBonus: st.skillBonus ?? 0,
+        /* 光附魔（闯关肉鸽）：被附魔的技能 id 列表。
+           这些技能出手时会被当成"带光的攻击"：伤害 +50（光加成）、
+           弹道带上 light 特质（能被裁光的细线吸收、喂光）。 */
+        lightSkills: st.lightSkills || null,
         lightBonus: 0,         // "光"特质攻击的附加伤害（开华 +50）
         summoner: st.summoner ?? -1,    // 召唤它的单位 id（-1 = 原生单位）
         stickerBloom: st.stickerBloom || null,  // 开华形态的贴图
@@ -980,6 +1011,9 @@ export class Battle {
       buf[o + 17] = u.auxKind || 0;
       /* 18 状态位。目前只有 bit0（飞行中）。渲染层靠它做虚化/变大/影子。 */
       buf[o + 18] = (u.invulnFrames > 0 || u.phasingFrames > 0) ? 1 : 0;
+      /* 19 长剑朝向（角度制）：见晴②的剑**始终指向锁定的敌人**（作者 2026-10），
+         渲染层画"平时那一柄剑"时用它（挥动过程仍由 swordSwing 事件的时间轴驱动）。 */
+      buf[o + 19] = u.swordAngle ?? 0;
     }
 
     // 弹道：只有存在弹道时才分配，绝大多数帧是 null
@@ -1641,34 +1675,54 @@ export class Battle {
        形态 / 防御技）仍然照旧按自己的冷却自动触发。 */
     const manual = unit.isPlayer && triggerType === 'cooldown';
     const pressed = manual && this.input && this.input.fire ? this.input.fire : null;
+    /* 玩家操控时，"没绑按键"的主动技能**自动释放**（闯关肉鸽的规则：
+       技能可以无限多，绑不过来的那些就交给 AI 自己放）。
+       界面把"已经绑了键"的技能 id 报上来（`input.bound`）；
+       没报就是"全都得按键"，与之前的行为一致。 */
+    const bound = manual && this.input && Array.isArray(this.input.bound) ? this.input.bound : null;
     for (const id of ids) {
       const sk = getSkill(id);
       if (!sk) continue;
       if (sk.trigger.type !== triggerType) continue;
-      if (manual && !sk.auto && !(pressed && pressed.indexOf(id) >= 0)) continue;
+      if (manual && !sk.auto) {
+        const isBound = bound ? bound.indexOf(id) >= 0 : true;
+        const hitKey = !!(pressed && pressed.indexOf(id) >= 0);
+        if (isBound && !hitKey) continue;      // 绑了键：等玩家按
+      }
       if ((unit.skillCd[id] || 0) > 0) continue;
 
       let fired = false;
-      if (triggerType === 'cooldown') {
-        fired = !!sk.run({ battle: this, unit, target });
-      } else if (triggerType === 'onWall') {
-        /* 把撞墙信息一并传给技能：内法线 + 球与墙面的接触点（世界坐标）。
-           接触点很重要 —— 球心离墙面有 r 那么远（夹紧时留的余量），
-           直接用球心位置会在场地中央凭空画出一个质点。 */
-        fired = !!sk.run({ battle: this, unit, target, ...(extra || {}) });
-      } else if (triggerType === 'onHit') {
-        const other = extra && extra.other;
-        if (!other) continue;
-        fired = !!sk.run({ battle: this, unit, target, other });
-      } else if (triggerType === 'onHpBelow') {
-        const ratio = unit.hp / unit.maxHp;
-        if (ratio > sk.trigger.ratio) continue;
-        if (unit.hpBelowFired[id]) continue;
-        fired = !!sk.run({ battle: this, unit, target });
-        if (fired) unit.hpBelowFired[id] = true;
-      } else if (triggerType === 'onHits') {
-        if (unit.hitsTaken + unit.hitsDealt < sk.trigger.count) continue;
-        fired = !!sk.run({ battle: this, unit, target });
+      /* 光附魔（闯关肉鸽）：被附魔的技能出手时，这一次攻击算"带光"——
+         伤害 +50（由 _lightDamage / _scaledDamage 读同一个临时加成）、
+         弹道带上 light 特质。用完立刻清掉，不会漏到别的技能上。
+         用 try/finally：技能里抛异常时也要把临时加成清干净 ——
+         留着它等于给下一次出手白送 50 点。 */
+      const lit = !!(unit.lightSkills && unit.lightSkills.indexOf(id) >= 0);
+      if (lit) unit.lightTemp = LIGHT_ENCHANT_BONUS;
+      try {
+        if (triggerType === 'cooldown') {
+          fired = !!sk.run({ battle: this, unit, target });
+        } else if (triggerType === 'onWall') {
+          /* 把撞墙信息一并传给技能：内法线 + 球与墙面的接触点（世界坐标）。
+             接触点很重要 —— 球心离墙面有 r 那么远（夹紧时留的余量），
+             直接用球心位置会在场地中央凭空画出一个质点。 */
+          fired = !!sk.run({ battle: this, unit, target, ...(extra || {}) });
+        } else if (triggerType === 'onHit') {
+          const other = extra && extra.other;
+          if (!other) continue;
+          fired = !!sk.run({ battle: this, unit, target, other });
+        } else if (triggerType === 'onHpBelow') {
+          const ratio = unit.hp / unit.maxHp;
+          if (ratio > sk.trigger.ratio) continue;
+          if (unit.hpBelowFired[id]) continue;
+          fired = !!sk.run({ battle: this, unit, target });
+          if (fired) unit.hpBelowFired[id] = true;
+        } else if (triggerType === 'onHits') {
+          if (unit.hitsTaken + unit.hitsDealt < sk.trigger.count) continue;
+          fired = !!sk.run({ battle: this, unit, target });
+        }
+      } finally {
+        if (lit) unit.lightTemp = 0;
       }
 
       if (fired && sk.trigger.cd) unit.skillCd[id] = sk.trigger.cd;
@@ -1719,7 +1773,9 @@ export class Battle {
       team: p.owner ? p.owner.team : -1,
       x: p.x, y: p.y,
       vx: p.vx, vy: p.vy,
-      damage: p.damage,
+      /* 光附魔（闯关肉鸽）：被附魔的技能出手时，它放出来的弹道伤害 +50。
+         见下面 traits 的说明 —— 在"弹道出生"这一个出口加，所有技能一视同仁。 */
+      damage: p.damage + ((p.owner && p.owner.lightTemp > 0) ? LIGHT_ENCHANT_BONUS : 0),
       r: p.radius,
       /* 宽度：激光这类"长条"弹道需要一个横向尺寸。
          碰撞仍按圆处理（半径 = 核心粗细的一半），渲染时画成柱体。
@@ -1732,8 +1788,18 @@ export class Battle {
       maxLife: p.life,
       color: p.color || '#7dd3fc',
       /* 特质标签："光"是裁光细线唯一会反应的东西，
-         开华的 +50 也只加在带"光"的攻击上。 */
-      traits: p.traits ? [...p.traits] : [],
+         开华的 +50 也只加在带"光"的攻击上。
+         **光附魔**（闯关肉鸽）：这个技能出手时（lightTemp > 0）放出来的弹道
+         自动带上"光"、并且伤害 +50 —— 作者的原话是"使其也可以附带光属性"。
+         加在**这里**（而不是各个技能的伤害公式里）的原因：伤害公式五花八门
+         （`_lightDamage` / `_scaledDamage` / 自己乘一遍的都有），
+         而在"弹道出生"这一个出口加，所有技能一视同仁。 */
+      traits: (() => {
+        const t = p.traits ? [...p.traits] : [];
+        const owner = p.owner;
+        if (owner && owner.lightTemp > 0 && t.indexOf('light') < 0) t.push('light');
+        return t;
+      })(),
       bounces: p.bounces || 0,       // 剩余可弹射次数（撞墙反弹而不是消失）
       /* 羽毛（见晴⑥）：进快照时占一个独立的 kind，渲染层据此画成羽毛形状，
          而不是普通的圆形光点。 */
@@ -2378,13 +2444,16 @@ export class Battle {
       wallHoming: false, turnCapDegPerSec: 0, _capHead: null,
       /* 借来的技能：id → { id, untilFrame, fns }（缇娜蝙蝠偷学） */
       borrow: null,
-      ringKind: 0, swordLen: 0, meleePenalty: 0, skillPenalty: 0,
+      ringKind: 0, swordLen: 0, swordAngle: 0, meleePenalty: 0, skillPenalty: 0,
       baseMelee: stats.melee ?? 0, meleeBonus: 0, spinMeleeBonus: 0,
       speedOverride: null, speedBonus: 0, speedSlow: 0, speedSlowFrames: 0, speedMul: 1,
       speedMulFrames: 0, dmgTakeMul: 1, dmgTakeMulFrames: 0,
       spinStacks: 0, spinAngle: 0, healAcc: 0, healed: 0,
       castP: 0, castKind: 0, aimAngle: 0, hasWindup: false, needsAim: false,
       damageMul: stats.damageMul ?? 1,
+      atkMul: stats.atkMul ?? 1,
+      skillBonus: stats.skillBonus ?? 0,
+      lightSkills: stats.lightSkills || null,
       lightBonus: 0,
       summoner: owner.id,
       hooks: {},
@@ -2511,7 +2580,8 @@ export class Battle {
   /** 只按倍率缩放、**不加**"光"加成。
       用途：裁光质点/细线的"每帧 1~2 点"接触伤害。
       开华的 +50 是加在"一次攻击"上的，如果每帧都 +50，
-      接触伤害会变成 51×60 = 3060/秒，显然不是原意。 */
+      接触伤害会变成 51×60 = 3060/秒，显然不是原意。
+      （光附魔也只加在"那一次攻击"上，见 _spawnProjectile / _damage。） */
   _scaledDamage(unit, base) {
     return Math.max(1, Math.round(base * ((unit && unit.damageMul) ?? 1)));
   }
@@ -3240,6 +3310,29 @@ export class Battle {
     if (to.dmgTakeMul != null && to.dmgTakeMul !== 1) {
       dmg = Math.max(1, Math.round(dmg * to.dmgTakeMul));
     }
+
+    /* ---------- 攻击方的伤害倍率（闯关肉鸽的 BOSS：除帧伤以外伤害 +50%）----------
+       放在这里而不是各个技能里：伤害出口只有这一个，一处覆盖碰撞 / 弹道 /
+       光柱 / 爆炸所有来源（和"羽毛减益"同一个理由）。
+       **帧伤不吃**（作者口径："除帧伤以外的伤害提高一半"）——
+       `opts.frame` 就是那一条通道。 */
+    if (from && !opts.frame && from.atkMul != null && from.atkMul !== 1) {
+      dmg = Math.max(1, Math.round(dmg * from.atkMul));
+    }
+
+    /* ---------- 「技能伤害 +N」（闯关肉鸽的属性提升：技能与碰撞伤害各 +5）----------
+       碰撞那一份在**数值源头**就加进了 melee（见 buildLevelConfig），
+       技能这一份在这里加：所有非帧伤、非碰撞的伤害出口都会吃到。
+       帧伤照样不吃（作者："帧伤不受影响"）。 */
+    if (from && !opts.frame && from.skillBonus > 0 && kind !== 'melee' && kind !== 'dash') {
+      dmg += from.skillBonus;
+    }
+
+    /* ---------- 光附魔（闯关肉鸽）：被附魔的技能出手时 +50 ----------
+       弹道的伤害在上面就加过了（见 _spawnProjectile），这里兜的是
+       "技能直接结算"的那一类（在 run() 里直接调 _damage 的技能）。
+       帧伤照样不吃（作者："除帧伤以外"）。 */
+    if (from && !opts.frame && from.lightTemp > 0) dmg += LIGHT_ENCHANT_BONUS;
 
     /* 闪避（辉光领域）：10% / 开华后 15%。
        用本局种子流取值，所以同一条种子必然闪避同样的次数，不影响可复现性。 */

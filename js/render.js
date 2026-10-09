@@ -1948,7 +1948,9 @@ export class Renderer {
           const k = 1 - Math.pow(1 - swing.t, 2.2);
           fa = swing.angle - swing.sweep / 2 + swing.sweep * k;
         } else {
-          fa = ((d[o + 6] ?? 0) * Math.PI) / 180;      // face（角度制）
+          /* 平时：朝**锁定的敌人**（快照第 19 位，引擎每帧算好的长剑朝向）。
+             以前这里读的是 face（移动方向）—— 作者 2026-10 改成"剑始终对着敌人"。 */
+          fa = ((d[o + 19] ?? d[o + 6] ?? 0) * Math.PI) / 180;
         }
         const x0 = x + Math.cos(fa) * rv;
         const y0 = y + Math.sin(fa) * rv;

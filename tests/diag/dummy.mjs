@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs';
    ============================================================ */
 import { Battle, SNAP_STRIDE } from '../../js/core.js';
 import { ARENAS, ARENA_BY_ID } from '../../js/arenas.js';
-import { DEFAULT_RULES, SPECIES, SPECIES_BY_ID, makeUnitStats } from '../../js/balls.js';
+import { DEFAULT_RULES, SPECIES, SPECIES_BY_ID, PLAYABLE_SPECIES, makeUnitStats } from '../../js/balls.js';
 import { Renderer } from '../../js/render.js';
 
 let pass = 0, fail = 0;
@@ -40,9 +40,11 @@ console.log('【1】数据（照作者给的规格）');
   check('速度 0', D.speed === 0, String(D.speed));
   check('碰撞伤害 50', D.melee === 50, String(D.melee));
   check('无技能', Array.isArray(D.skills) && D.skills.length === 0, JSON.stringify(D.skills));
-  check('体型为大（半径 > 所有角色）',
-    SPECIES.filter(s => s.id !== 'dummy').every(s => D.r > s.r),
-    `木桩 r=${D.r}，角色里最大的 r=${Math.max(...SPECIES.filter(s => s.id !== 'dummy').map(s => s.r))}`);
+  /* 2026-10 起多了"闯关专用"的敌人（NPC13 / NPC23 也是大体型 r=30），
+     所以判据写成"木桩落在最大那一档、且不比任何**可选角色**小"。 */
+  check('体型为大（最大那一档，且不小于任何可选角色）',
+    D.r === 30 && PLAYABLE_SPECIES.filter(s => s.id !== 'dummy').every(s => D.r >= s.r),
+    `木桩 r=${D.r}，可选角色里最大的 r=${Math.max(...PLAYABLE_SPECIES.filter(s => s.id !== 'dummy').map(s => s.r))}`);
   check('标了 immovable（否则会被撞飞，见下面的引擎用例）', D.immovable === true);
 
   const st = makeUnitStats('dummy');
@@ -62,11 +64,21 @@ console.log('【1】数据（照作者给的规格）');
     !/id: '(test|test_skill|test_charge|test_lowhp|test_heavy)'/.test(src),
     ['test', 'test_skill', 'test_charge', 'test_lowhp', 'test_heavy']
       .filter(id => src.includes(`id: '${id}'`)).join('、') || '源码里一个都没有');
-  check('游戏里的球就是 4 个角色 + 木桩', gameBalls.length === 5,
-    gameBalls.map(s => `${s.name}(${s.id})`).join('、'));
+  /* 2026-10 加了闯关肉鸽：斗蛐蛐**能选**的仍然是 4 角色 + 木桩；
+     另外还有一批"闯关专用"的球（玩家球 + 6 个关卡敌人），它们标了 rogueOnly，
+     不会出现在准备界面的选球列表里。 */
+  check('斗蛐蛐能选的球就是 4 个角色 + 木桩',
+    PLAYABLE_SPECIES.length === 5 &&
+    ['yuncai', 'taoyao', 'tina', 'jianqing', 'dummy'].every(id => PLAYABLE_SPECIES.some(s => s.id === id)),
+    PLAYABLE_SPECIES.map(s => `${s.name}(${s.id})`).join('、'));
+  const rogueBalls = gameBalls.filter(s => s.rogueOnly);
+  check('闯关专用球都标了 rogueOnly（玩家球 + 6 个关卡敌人）',
+    rogueBalls.length === 7 && rogueBalls.some(s => s.id === 'hero') &&
+    rogueBalls.filter(s => s.id.startsWith('npc')).length === 6,
+    rogueBalls.map(s => s.id).join('、'));
   check('夹具球是诊断脚本自己注册进来的（游戏侧不受影响）',
     SPECIES.some(s => s.id === 'test') && src.includes('木桩'),
-    `本进程 SPECIES 有 ${SPECIES.length} 个（含夹具），源码里只有 4 个`);
+    `本进程 SPECIES 有 ${SPECIES.length} 个（含夹具），源码里是 ${gameBalls.length} 个`);
 }
 
 /* ---------- 2) 速度恒为 0：被围撞一整局也不动 ---------- */

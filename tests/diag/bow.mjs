@@ -149,8 +149,8 @@ console.log('=========== 手持物件（弓）· 动作动画自检 ===========\
 /* ============ 1. 快照布局 ============ */
 console.log('【1】快照布局');
 {
-  check('SNAP_STRIDE 已扩到 19（castP / aimAngle / castKind / 水镜两色 / 状态位）',
-    SNAP_STRIDE === 19, String(SNAP_STRIDE));
+  check('SNAP_STRIDE 已扩到 20（castP / aimAngle / castKind / 水镜两色 / 状态位 / 长剑朝向）',
+    SNAP_STRIDE === 20, String(SNAP_STRIDE));
   const b = mk(['taoyao_rong']);
   const bad = b.snapshots.find(s => s.data.length !== b.units.length * SNAP_STRIDE);
   check('每帧快照长度 = 单位数 × 步长', !bad, bad ? '有异常快照' : `每帧 ${b.units.length * SNAP_STRIDE} 个数值`);

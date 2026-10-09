@@ -157,12 +157,17 @@ console.log('【1】水镜外圈（边缘那一圈 = 当前形态）');
 function c2hex(s) { return String(s).toLowerCase(); }
 
 /* ---------- 2) 猩红长剑 ---------- */
-console.log('\n【2】猩红长剑（绑在球缘、随移动方向）');
+console.log('\n【2】猩红长剑（绑在球缘、**始终朝向锁定的敌人**）');
 {
   const b = mk(['jianqing_mirror_sword']);
-  const u = b.units[0];
-  u.face = 0;                       // 朝 +x
+  const u = b.units[0], foe = b.units[1];
+  u.face = 0;                       // 朝向（移动方向）= +x
   u.vx = 120 * 1000; u.vy = 0;
+  /* 故意把敌人放到**正上方**：移动方向是 +x、敌人在 −y ——
+     剑要指着敌人（−90°），而不是指着移动方向（作者 2026-10 的修改）。 */
+  foe.x = u.x; foe.y = u.y - Math.round(200 * 1000);
+  b.step();
+  foe.x = u.x; foe.y = u.y - Math.round(200 * 1000);
   b.step();
   const { ctx, rd } = mkR();
   ctx.calls.length = 0;
@@ -172,16 +177,21 @@ console.log('\n【2】猩红长剑（绑在球缘、随移动方向）');
   check('画了猩红色的剑身', sword.length > 0, `${sword.length} 笔`);
   check('剑的粗细用的是可调常量 SWORD_W', sword.some(c => near(c.lw, SWORD_W, 0.01)),
     sword.length ? String(sword[0].lw) : '-');
-  /* 起点在球缘、终点在球缘 + 剑长（都沿 face = +x）。
+  /* 起点在球缘、终点在球缘 + 剑长，**沿着"指向敌人"的方向（−90°）**。
      用"剑柄那个 moveTo"往后找紧随其后的 lineTo —— 直接找第一个 lineTo
      会拿到别的绘制（血条、别的球）的坐标。 */
-  const hi = ctx.calls.findIndex(c => c.name === 'moveTo' && near(c.a[0], x + r, 1.5) && near(c.a[1], y, 1.5));
+  const hx = x + Math.cos(-Math.PI / 2) * r, hy = y + Math.sin(-Math.PI / 2) * r;
+  const hi = ctx.calls.findIndex(c => c.name === 'moveTo' && near(c.a[0], hx, 1.5) && near(c.a[1], hy, 1.5));
+  check('剑柄贴着球缘、且落在"敌人那一侧"（−90°，不是移动方向 +x）', hi >= 0,
+    hi >= 0 ? `moveTo(${ctx.calls[hi].a[0].toFixed(1)}, ${ctx.calls[hi].a[1].toFixed(1)})` : '没画在那个位置');
   const end = hi >= 0 ? ctx.calls.slice(hi + 1).find(c => c.name === 'lineTo') : null;
-  check('剑从球缘伸出（起点在 x + r 附近）', hi >= 0,
-    hi >= 0 ? `moveTo(${ctx.calls[hi].a[0].toFixed(1)}, ${ctx.calls[hi].a[1].toFixed(1)})` : '没画');
   check(`剑长 = 球半径 + swordLen（${r}+${u.swordLen} = ${r + u.swordLen}）`,
-    end && near(end.a[0], x + r + u.swordLen, 2),
-    end ? `${end.a[0].toFixed(1)}` : '没画');
+    end && near(end.a[1], hy - u.swordLen, 2),
+    end ? `lineTo(${end.a[0].toFixed(1)}, ${end.a[1].toFixed(1)})` : '没画');
+  const snap = b.snapshots[b.snapshots.length - 1].data;
+  check('快照第 19 位就是长剑朝向（≈270°）',
+    Math.abs(snap[u.id * SNAP_STRIDE + 19] - 270) < 2,
+    `${Number(snap[u.id * SNAP_STRIDE + 19]).toFixed(1)}°`);
 
   /* 没装剑就不画 */
   const b2 = mk([]);

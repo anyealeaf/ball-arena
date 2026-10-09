@@ -6,7 +6,7 @@
    ============================================================ */
 
 import {
-  SPECIES, SPECIES_BY_ID, DEFAULT_SPECIES_ID, DEFAULT_RULES,
+  SPECIES, SPECIES_BY_ID, PLAYABLE_SPECIES, DEFAULT_SPECIES_ID, DEFAULT_RULES,
   TIME_LIMIT_OPTIONS, MAX_TEAMS, teamColor, makeUnitStats,
   MAX_SKILLS_PER_UNIT, defaultSkillsFor, normalizeSkills
 } from './balls.js';
@@ -487,7 +487,7 @@ export function renderPrepare(root, onStart) {
         : `技能 ${equipped.length}/${owned.length}`);
     row.innerHTML = `
       <span class="idx">#${i + 1}</span>
-      <select>${SPECIES.map(s =>
+      <select>${PLAYABLE_SPECIES.map(s =>
         `<option value="${s.id}"${s.id === speciesId ? ' selected' : ''}>${s.name}（HP ${s.hp}）</option>`
       ).join('')}</select>
       <button class="btn sm skill-btn${equipped.length && !random ? ' has' : ''}"${owned.length && !random ? '' : ' disabled'}

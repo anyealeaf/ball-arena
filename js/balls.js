@@ -1,4 +1,4 @@
-﻿/* ============================================================
+/* ============================================================
    balls.js — 小球定义表（数据层）
    ------------------------------------------------------------
    这一层是"内容"，不是"引擎"。将来接入你的原创角色时，
@@ -348,10 +348,123 @@ export const SPECIES = [
     sticker: null,             // 没有贴图：渲染层会退回纯色圆
     resource: null,
     skills: []                 // 无技能
+  },
+
+  /* ============================================================
+     闯关肉鸽 · 玩家球（作者 2026-10 的规格：1500 血 / 中型 / 120 速 / 碰撞 50）
+     ------------------------------------------------------------
+     它不是一个"可选球种"，而是这个模式里的**玩家自己**：
+     血量、移速、碰撞伤害都会随着闯关的"属性提升"成长，
+     技能则来自开局选的三个球种所并成的技能池（数量无上限）。
+     所以它在斗蛐蛐的选球列表里也不出现（rogueOnly）。
+     没有贴图：渲染层退回纯色圆（有美术时换 sticker 即可）。 */
+  {
+    id: 'hero',
+    name: '玩家球',
+    color: '#60a5fa',
+    hp: 1500, r: 16, speed: 120, melee: 50, reach: 0,
+    desc: '闯关肉鸽模式里你操控的小球：1500 血、中型、移速 120、碰撞伤害 50。' +
+          '技能与属性在闯关过程中成长。',
+    tags: ['闯关', '玩家'],
+    image: null, sticker: null, resource: null,
+    skills: [],
+    rogueOnly: true,
+    rogue: { isHero: true, tier: '玩家' },
+  },
+
+  /* ============================================================
+     闯关肉鸽模式的敌人（作者 2026-10 设计，数值一字不改）
+     ------------------------------------------------------------
+     6 个"关卡专用"小球：3 个小怪（难度 1）+ 3 个精英（难度 2）。
+     它们**不出现在斗蛐蛐准备界面**（`rogueOnly: true`，见 PLAYABLE_SPECIES）——
+     那是个"两边各选几个球对打"的模式，塞进关卡敌人只会让选球列表变长。
+     图鉴里仍然列出来，方便查看数值。
+
+     体型三档（与木桩一致的一套口径）：
+       小 r=12（直径 24）/ 中 r=16（直径 32，= 本体标准大小）/ 大 r=30（直径 60）
+     难度分只被闯关模式读（`rogue.diff`），引擎不关心。 */
+  {
+    id: 'npc11',
+    name: 'NPC11',
+    color: '#6b8fbf',
+    hp: 500, r: 16, speed: 100, melee: 0, reach: 0,
+    desc: '闯关模式的小怪：500 血、中型、移速 100，每 2 秒发射一个 50 伤害、400 弹速的魔弹。难度分 1。',
+    tags: ['关卡', '小怪'],
+    image: null, sticker: null, resource: null,
+    skills: ['npc_bolt50'],
+    rogueOnly: true,
+    rogue: { diff: 1, tier: '小怪' },
+  },
+  {
+    id: 'npc12',
+    name: 'NPC12',
+    color: '#7f9c6b',
+    hp: 700, r: 16, speed: 120, melee: 50, reach: 0,
+    desc: '闯关模式的小怪：700 血、中型、移速 120、碰撞伤害 50，没有技能。难度分 1。',
+    tags: ['关卡', '小怪'],
+    image: null, sticker: null, resource: null,
+    skills: [],
+    rogueOnly: true,
+    rogue: { diff: 1, tier: '小怪' },
+  },
+  {
+    id: 'npc13',
+    name: 'NPC13',
+    color: '#9c8a6b',
+    hp: 1000, r: 30, speed: 50, melee: 100, reach: 0,
+    desc: '闯关模式的小怪：1000 血、大体型、移速 50、碰撞伤害 100，没有技能。难度分 1。',
+    tags: ['关卡', '小怪'],
+    image: null, sticker: null, resource: null,
+    skills: [],
+    rogueOnly: true,
+    rogue: { diff: 1, tier: '小怪' },
+  },
+  {
+    id: 'npc21',
+    name: 'NPC21',
+    color: '#bf6b8f',
+    hp: 150, r: 12, speed: 200, melee: 0, reach: 0,
+    desc: '闯关模式的精英：150 血、小体型、移速 200，每秒发射一个 100 伤害、550 弹速的魔弹。' +
+          '血少但很凶。难度分 2。',
+    tags: ['关卡', '精英'],
+    image: null, sticker: null, resource: null,
+    skills: ['npc_bolt100'],
+    rogueOnly: true,
+    rogue: { diff: 2, tier: '精英' },
+  },
+  {
+    id: 'npc22',
+    name: 'NPC22',
+    color: '#8f6bbf',
+    hp: 1000, r: 16, speed: 120, melee: 100, reach: 0,
+    desc: '闯关模式的精英：1000 血、中型、移速 120、碰撞伤害 100，' +
+          '每 2 秒发射一个 50 伤害、400 弹速的魔弹。难度分 2。',
+    tags: ['关卡', '精英'],
+    image: null, sticker: null, resource: null,
+    skills: ['npc_bolt50'],
+    rogueOnly: true,
+    rogue: { diff: 2, tier: '精英' },
+  },
+  {
+    id: 'npc23',
+    name: 'NPC23',
+    color: '#bf9c6b',
+    hp: 1500, r: 30, speed: 75, melee: 250, reach: 0,
+    desc: '闯关模式的精英：1500 血、大体型、移速 75、碰撞伤害高达 250，没有技能。' +
+          '被它撞一下非常痛。难度分 2。',
+    tags: ['关卡', '精英'],
+    image: null, sticker: null, resource: null,
+    skills: [],
+    rogueOnly: true,
+    rogue: { diff: 2, tier: '精英' },
   }
 ];
 
 export const SPECIES_BY_ID = Object.fromEntries(SPECIES.map(s => [s.id, s]));
+
+/** 斗蛐蛐准备界面里**能选**的球种：关卡专用敌人（rogueOnly）不在其中。
+ *  图鉴仍然列全部 —— 那边是"查看数值"的地方，不是选人。 */
+export const PLAYABLE_SPECIES = SPECIES.filter(s => !s.rogueOnly);
 
 /**
  * 小球显示/体积倍率。

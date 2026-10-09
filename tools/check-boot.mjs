@@ -188,6 +188,62 @@ const check = (name, ok, detail = '') => checks.push({ name, ok: !!ok, detail })
         check('自己点「重新准备」不会被守门人拦下（能正常回到准备页）',
           !!app.querySelector('#startBtn') && !app.querySelector('#battleCanvas'));
       }
+
+      /* ---------- ①b 闯关肉鸽（在同一个环境里接着走：换 env 的话
+         main.js 是模块缓存的，route() 还绑在第一个 env 的 window 上）---------- */
+      if (env.window.__battleScreen) env.window.__battleScreen.detach();   // 上面那局还在打
+      go('#/rogue');
+      check('肉鸽首页渲染出来了', text().includes('闯关肉鸽') && !text().includes('页面没能启动'),
+        `${text().length} 字`);
+      const picks = [...app.querySelectorAll('[data-pick]')];
+      check('列出可选的球种卡片（至少 4 个）', picks.length >= 4, `${picks.length} 张`);
+      check('没选满三个时「开始闯关」是禁用的',
+        app.querySelector('#rgStart').disabled === true);
+      picks.slice(0, 3).forEach(b => b.onclick());
+      check('选满三个后可以开始（不多不少三个）',
+        app.querySelector('#rgStart').disabled !== true &&
+        app.querySelectorAll('[data-pick].on').length === 3,
+        `${app.querySelectorAll('[data-pick].on').length} 个选中`);
+      guard('点开始闯关', () => app.querySelector('#rgStart').onclick());
+      check('进入抽取界面：三张技能卡 + 三个属性选项',
+        app.querySelectorAll('[data-take]').length === 3 &&
+        app.querySelectorAll('[data-stat]').length === 3,
+        `${app.querySelectorAll('[data-take]').length} 张卡 / ${app.querySelectorAll('[data-stat]').length} 个属性`);
+      check('抽取界面写着"开局抽取"', /开局抽取/.test(text()), text().slice(0, 60));
+      const reroll = app.querySelector('[data-reroll]');
+      if (reroll) {
+        guard('点重抽', () => reroll.onclick());
+        check('重抽之后该按钮变灰（一手只能重抽一次）',
+          app.querySelectorAll('[data-reroll]')[0].disabled === true);
+      }
+      guard('选第一个技能', () => app.querySelector('[data-take]').onclick());
+      check('第一次抽完 → 第二次抽取（还剩 1 次）', /还剩 1 次/.test(text()), text().slice(0, 60));
+      guard('选一个属性', () => app.querySelector('[data-stat="hp"]').onclick());
+      check('两次抽完 → 进入战斗界面（画布 + 斗蛐蛐开始）',
+        !!app.querySelector('#battleCanvas') && !!app.querySelector('#btStart'));
+      check('战斗界面顶上写着第几关与难度', /第 1 关/.test(text()) && /难度 1/.test(text()),
+        text().slice(0, 60));
+      check('战斗界面没有「换种子重开」（关卡模式里没意义）',
+        !app.querySelector('#btAgain'));
+      check('退出按钮写的是「退出闯关」',
+        /退出闯关/.test(app.querySelector('#btBack').textContent));
+      guard('开始第 1 关', () => app.querySelector('#btStart').onclick());
+      env.runFrames(30);
+      const rb = app.querySelector('#battleCanvas').__battle;
+      const hero = rb.units[rb.playerIdx];
+      /* 上面第二次抽取选的是「生命 +150」，所以上限应当是 1500 + 150 = 1650。
+         速度/碰撞只做"是个正常值"的断言 —— 第一次抽到的**技能**会改它们：
+         权杖（碰撞 +15）、见晴②（移速 +10）、**吸血习性（碰撞锁死 30）**…
+         这些是正常加成/改写，不是这里的判据。
+         （"基础数值就是 1500/120/50"由 rogue.mjs 的 A4 守着，这里验的是
+         "属性提升真的带进了战斗"。） */
+      check('玩家球带着刚选的属性提升进了战斗（1500 + 150 生命）',
+        hero.maxHp === 1650 && hero.speed / 1000 >= 120 && hero.melee > 0,
+        `${hero.maxHp} 血 / ${hero.speed / 1000} 速 / 碰撞 ${hero.melee}`);
+      check('第 1 关只有 1~2 个敌人（难度 1）',
+        rb.units.length - 1 >= 1 && rb.units.length - 1 <= 2, `${rb.units.length - 1} 个敌人`);
+      check('肉鸽关卡打起来不报错（跑 30 帧）', env.calls.n > 0, `${env.calls.n} 次绘制调用`);
+      check('没有"页面没能启动"', !text().includes('页面没能启动'));
     }
   }
 }
