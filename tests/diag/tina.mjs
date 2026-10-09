@@ -6,10 +6,11 @@
  *
  * 用法：node tests/diag/tina.mjs
  */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle, SNAP_STRIDE } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, SPECIES_BY_ID, makeUnitStats, SCALE, DT } from '../../js/balls.js';
-import { TINA, getSkill, resolveLoadout, skillGroup } from '../../js/skills.js';
+import { TINA, JIANQING, getSkill, resolveLoadout, skillGroup } from '../../js/skills.js';
 
 const T = SPECIES_BY_ID.tina;
 let pass = 0, fail = 0;
@@ -26,7 +27,7 @@ function mk(skills, opts = {}) {
       { units: [{ stats: stats('tina', skills) }] },
       { units: [{ stats: stats(opts.foeId || 'test', opts.foeSkills || []) }] },
     ],
-    arena: ARENA_BY_ID[opts.arenaId || 'rect'],
+    arena: opts.arena || ARENA_BY_ID[opts.arenaId || 'rect'],
     sizeScale: 1,
     rules: { ...DEFAULT_RULES, timeLimit: opts.timeLimit ?? 30 },
     seed: opts.seed ?? 7,
@@ -248,6 +249,240 @@ console.log('\n【②】蝙蝠');
     live4 ? String(live4.damage) : '-');
 }
 
+/* ============ ②b 偷学"持续发动型"能力：借来用 stealSeconds 秒 ============
+   作者 2026-10 报的 bug：缇娜通过蝙蝠发动见晴的变色能力时"发动了但没有效果"。
+   原因：那类能力的 run() 只切一次颜色，效果全在它自己的被动 + 每帧钩子里，
+   缇娜身上没有那些钩子。现在改成"把技能临时装到缇娜身上 N 秒"。 */
+console.log('\n【②b】偷袭持续发动型能力（借用 N 秒）');
+{
+  const P = TINA.bat;
+  const JQ = JIANQING;
+
+  /** 借用的机制层测试：借的人**不带蝙蝠**（skills: []），
+   *  否则蝙蝠会一直攒魔力、反复触发偷学 —— 归还是一瞬间的事，
+   *  但下一帧又借上了，量到的是"又回了一秒血"（第一版就是这么假红的）。
+   *  对手的近战也清 0：这样血量变化只可能来自借来的那个技能。 */
+  const mkPair = (borrowerId, foeId, foeSkills) => {
+    const b = new Battle({
+      teams: [
+        { units: [{ stats: { ...makeUnitStats(borrowerId), skills: [] } }] },
+        { units: [{ stats: { ...makeUnitStats(foeId), skills: foeSkills } }] },
+      ],
+      arena: ARENA_BY_ID.rect, sizeScale: 1,
+      rules: { ...DEFAULT_RULES, timeLimit: 60 }, seed: 7,
+    });
+    b.units[1].melee = 0; b.units[1].baseMelee = 0;
+    return b;
+  };
+  /** 直接借（绕开运气：诊断要验的是借用机制本身） */
+  const borrow = (skillId) => {
+    const b = mkPair('tina', 'jianqing', [skillId]);
+    const u = b.units[0];
+    return { b, u, ok: b.grantSkill(u, skillId, P.stealSeconds) };
+  };
+  const hooksWith = (u, name, fn) => ((u.hooks[name] || []).filter(f => f === fn).length);
+
+  /* ---- ① 水镜（防御）：护盾 + 回血真的跑起来了 ---- */
+  {
+    const SK = getSkill('jianqing_mirror_def');
+    const { b, u, ok } = borrow(SK.id);
+    check('能借到见晴的①（grantSkill 成功）', ok && !!u.borrow[SK.id],
+      ok ? Object.keys(u.borrow).join(',') : '失败');
+    check('借用发了 borrow 事件', ev(b, 'borrow').length === 1,
+      ev(b, 'borrow').map(e => `${e.skill}/${e.value}s`).join('、'));
+    /* 护盾池必须换成水镜的资源条：缇娜自己那条是魔力（上限 5），
+       拿它当护盾会当场把"魔力满 5 → 再偷一次"的循环点着。 */
+    check(`护盾池换成水镜的（上限 ${JQ.mirrorDef.shieldMax}）`,
+      u.resMax === JQ.mirrorDef.shieldMax, String(u.resMax));
+    /* 强制淡绿：这一秒应当回血（对手近战已清 0，掉血只可能来自别处） */
+    u.hp = Math.round(u.maxHp * 0.5);
+    const hp1 = u.hp;
+    for (let i = 0; i < 60; i++) { u.flags.mirrorColor = 1; u.ringKind = 1; b.step(); }
+    check(`借来的①淡绿真的回血（每秒 +${JQ.mirrorDef.healPerSec}）`,
+      u.hp >= hp1 + JQ.mirrorDef.healPerSec - 2, `${hp1} → ${u.hp}`);
+    /* 强制淡粉：这一秒应当涨护盾 */
+    for (let i = 0; i < 60; i++) { u.flags.mirrorColor = 2; u.ringKind = 2; b.step(); }
+    check(`借来的①淡粉真的涨护盾（每秒 +${JQ.mirrorDef.shieldPerSec}）`,
+      u.res > 0, `护盾 ${u.res}/${u.resMax}`);
+    check(`借来的①淡粉给了碰撞加成（+${JQ.mirrorDef.meleeBonus}）`,
+      u.melee === u.baseMelee + JQ.mirrorDef.meleeBonus,
+      `${u.baseMelee} → ${u.melee}`);
+    const resBefore = u.res, hpBefore = u.hp;
+    b._damage(null, u, 10, 'skill');
+    check('借来的①护盾真的挡伤害（onBeforeDamage 挂上了）',
+      u.res < resBefore && u.hp === hpBefore, `护盾 ${resBefore} → ${u.res}`);
+    /* 到期：自动归还 */
+    for (let i = 0; i < Math.round(P.stealSeconds / DT) + 4; i++) b.step();
+    check(`${P.stealSeconds} 秒后自动归还（borrow 清空）`,
+      !u.borrow || !u.borrow[SK.id],
+      u.borrow ? Object.keys(u.borrow).join(',') : '空');
+    check('归还后发 borrowEnd', ev(b, 'borrowEnd').length === 1,
+      ev(b, 'borrowEnd').map(e => e.skill).join('、'));
+    check('归还后资源条还给缇娜（魔力上限 5、不是被借走的护盾）',
+      u.resMax === T.resource.max, String(u.resMax));
+    check('归还后碰撞加成撤掉（不会永久 +10）',
+      u.melee === u.baseMelee, `${u.baseMelee} → ${u.melee}`);
+    check('归还后水镜圈也撤掉', u.ringKind === 0, String(u.ringKind));
+    check('归还后钩子摘干净了（onMove / onBeforeDamage 都不再挂着）',
+      hooksWith(u, 'onMove', SK.hooks.onMove) === 0 &&
+      hooksWith(u, 'onBeforeDamage', SK.hooks.onBeforeDamage) === 0,
+      `onMove ${hooksWith(u, 'onMove', SK.hooks.onMove)} 个 / onBeforeDamage ${hooksWith(u, 'onBeforeDamage', SK.hooks.onBeforeDamage)} 个`);
+    check('本体技能的钩子没被误删（缇娜自己的钩子还在）',
+      Object.values(u.hooks).every(a => a.length === new Set(a).size),
+      Object.entries(u.hooks).map(([k, a]) => `${k}:${a.length}`).join(' '));
+  }
+
+  /* ---- ② 猩红长剑：借来就真的握着一柄剑 ---- */
+  {
+    const { b, u } = borrow('jianqing_mirror_sword');
+    check(`借来的②真的挂上了剑（剑长 ${JQ.mirrorSword.swordLen}）`,
+      u.swordLen === JQ.mirrorSword.swordLen, String(u.swordLen));
+    check(`借来的②给了移速加成（+${JQ.mirrorSword.speedBonus}）`,
+      u.speed / SCALE === T.speed + JQ.mirrorSword.speedBonus,
+      `${T.speed} → ${u.speed / SCALE}`);
+    for (let i = 0; i < Math.round(P.stealSeconds / DT) + 4; i++) b.step();
+    check('归还后剑收起来了（剑长 0）', u.swordLen === 0, String(u.swordLen));
+    check('归还后移速退回原值',
+      Math.abs(u.speed / SCALE - T.speed) < 0.01, String(u.speed / SCALE));
+  }
+
+  /* ---- ③ 借来的魔弹：真的打得出去 ----
+     弹道有没有出现过**要每帧扫**：拿"结束时的 projectiles.length"当判据
+     会漏 —— 魔弹飞出场地就被移除了（这个坑在下面 §3 里就踩过一次）。 */
+  {
+    const b = mkPair('tina', 'dummy', []);
+    const u = b.units[0];
+    b.grantSkill(u, 'jianqing_mirror_borrow', P.stealSeconds);
+    let sawModan = false, modanDmg = null;
+    const frames = Math.round(P.stealSeconds / DT);
+    for (let i = 0; i < frames + 12 && !b.over; i++) {
+      /* 只在**借用期间**强制颜色；归还之后不能再按着它，否则量到的是
+         我自己写进去的 auxKind（不是引擎留下的残留）。 */
+      if (i < frames - 6) { u.flags.borrowColor = 3; u.auxKind = 3; }
+      b.step();
+      for (const p of b.projectiles) {
+        if (p.tag === 'modan') { sawModan = true; modanDmg = p.damage; }
+      }
+    }
+    check('借来的③真的发射了魔弹（深蓝紫态）', sawModan, sawModan ? '出现过魔弹' : '没发射');
+    check('借来的③魔弹用的是见晴的数值',
+      modanDmg === JQ.mirrorBorrow.modanDmg, String(modanDmg));
+    check('归还后借用色清掉（auxKind = 0）', u.auxKind === 0, String(u.auxKind));
+  }
+
+  /* ---- ④ 起飞：借来**立刻**起飞，滞空用自己的 seconds，落地照给叠加移速 ----
+     作者 2026-10 的口径：「起飞借来立刻飞 4 秒，且获得叠加移速」。 */
+  {
+    const TK = JQ.takeoff;
+    const b = mkPair('tina', 'dummy', []);
+    const u = b.units[0];
+    const speed0 = u.speed / SCALE;                 // 125
+    b.grantSkill(u, 'jianqing_takeoff', P.stealSeconds);
+    check('借来的④不用走满距离：grantSkill 当帧就起飞',
+      u.flags.flyFrames > 0 && u.phasingFrames > 0,
+      `flyFrames=${u.flags.flyFrames}（${(u.flags.flyFrames * DT).toFixed(1)} 秒）`);
+    check(`借来的④滞空时长用它自己的 seconds（${TK.seconds} 秒）`,
+      Math.abs(u.flags.flyFrames * DT - TK.seconds) < 0.05,
+      `${(u.flags.flyFrames * DT).toFixed(2)} 秒`);
+    check('借来的④空中移速加成照给',
+      u.speed / SCALE === speed0 + TK.speedBonus, `${speed0} → ${u.speed / SCALE}`);
+    check('借来的④空中受伤减半、撞墙锁定也照开',
+      u.dmgTakeMul === TK.damageTakenMul && u.wallHoming === !!TK.wallHoming,
+      `减伤 ×${u.dmgTakeMul}`);
+    /* 跑到落地（seconds 秒），看一眼"永久 +5"有没有记账 */
+    for (let i = 0; i < Math.round(TK.seconds / DT) + 4 && !b.over; i++) b.step();
+    check('借来的④落地后拿到"每次飞完永久 +5 移速"',
+      Math.abs(u.speed / SCALE - (speed0 + TK.speedPerFlight)) < 0.01,
+      `${speed0} → ${u.speed / SCALE}`);
+    check('借来的④落地发了 flyUpgrade / landing',
+      ev(b, 'flyUpgrade').length === 1 && ev(b, 'landing').length === 1,
+      `flyUpgrade ${ev(b, 'flyUpgrade').length} / landing ${ev(b, 'landing').length}`);
+    /* 借用到期（5 秒 > 滞空 4 秒）：**那份 +5 不能被归还撤掉** */
+    for (let i = 0; i < Math.round(P.stealSeconds / DT) + 4 && !b.over; i++) b.step();
+    check('归还起飞技能后：那份永久 +5 留着（作者："获得叠加移速"）',
+      Math.abs(u.speed / SCALE - (speed0 + TK.speedPerFlight)) < 0.01,
+      String(u.speed / SCALE));
+    check('归还后飞行状态确实已经收干净',
+      u.phasingFrames === 0 && u.dmgTakeMul === 1 && u.turnCapDegPerSec === 0,
+      `穿透 ${u.phasingFrames} / 减伤 ×${u.dmgTakeMul} / 限速 ${u.turnCapDegPerSec}`);
+  }
+
+  /* ---- ⑤ 精灵变身：借来 5 秒，到期原样还原（体型 / 伤害倍率 / 移速） ---- */
+  {
+    const TR = JQ.transform;
+    const b = mkPair('tina', 'dummy', []);
+    const u = b.units[0];
+    const r0 = u.r, dmg0 = u.damageMul, spd0 = u.speed / SCALE;
+    b.grantSkill(u, 'jianqing_transform', P.stealSeconds);
+    check(`借来的⑤体型变小（×${TR.sizeMul}）`,
+      Math.abs(u.r - Math.round(r0 * TR.sizeMul)) <= 1, `${r0} → ${u.r}`);
+    check(`借来的⑤伤害倍率 ×${TR.damageMul}（对缇娜是削弱）`,
+      Math.abs(u.damageMul - dmg0 * TR.damageMul) < 1e-9, String(u.damageMul));
+    check(`借来的⑤移速 +${TR.speedBonus}`,
+      u.speed / SCALE === spd0 + TR.speedBonus, `${spd0} → ${u.speed / SCALE}`);
+    for (let i = 0; i < Math.round(P.stealSeconds / DT) + 4; i++) b.step();
+    check('归还后体型 / 伤害倍率 / 移速**原样**还回来',
+      u.r === r0 && u.damageMul === dmg0 &&
+      Math.abs(u.speed / SCALE - spd0) < 0.01,
+      `r ${u.r}（原 ${r0}）、伤害 ×${u.damageMul}、移速 ${u.speed / SCALE}（原 ${spd0}）`);
+  }
+
+  /* ---- ⑥ 我很可爱：借来**立刻发一次羽毛**（不是借用 5 秒） ---- */
+  {
+    const F = JQ.feather;
+    const b = mkPair('tina', 'dummy', []);
+    const u = b.units[0];
+    const feathersBefore = b.projectiles.filter(p => p.tag === 'feather').length;
+    /* 走**真实**的偷学入口：见晴只装⑥ → 池子里只有它
+       （它有 run() 所以落在"放一次"那一支，不走 5 秒借用） */
+    const sk = getSkill('jianqing_feather');
+    const fired = sk.run({ battle: b, unit: u, target: b.units[1] });
+    const feathers = b.projectiles.filter(p => p.tag === 'feather' && p.owner === u.id);
+    check('借来的⑥立刻发了一根羽毛', fired === true && feathers.length === feathersBefore + 1,
+      `${feathersBefore} → ${feathers.length} 根（owner = 缇娜）`);
+    check(`羽毛数值用的是见晴的（速度 ${F.speed}）`,
+      feathers.length > 0 && Math.abs(Math.hypot(feathers[0].vx, feathers[0].vy) / SCALE - F.speed) < 1,
+      feathers.length ? `${(Math.hypot(feathers[0].vx, feathers[0].vy) / SCALE).toFixed(0)}` : '-');
+    check('⑥不标 sustain（所以不会变成"借用 5 秒"）', !sk.sustain, String(!!sk.sustain));
+    check('⑥没有进 borrow 名单（只是放一次）',
+      !u.borrow || !u.borrow[sk.id], u.borrow ? Object.keys(u.borrow).join(',') : '空');
+  }
+
+  /* ---- 真流程：见晴只装⑥ → 蝙蝠偷到就是"立刻一根缇娜的羽毛" ---- */
+  {
+    const b = mk(['tina_bat'], { foeId: 'jianqing', foeSkills: ['jianqing_feather'], timeLimit: 40 });
+    const tina = b.units[0];
+    let mine = false;
+    for (let i = 0; i < 60 * 40 && !b.over && !mine; i++) {
+      b.step();
+      if (b.projectiles.some(p => p.tag === 'feather' && p.owner === tina.id)) mine = true;
+    }
+    const st = ev(b, 'steal');
+    check('真流程：偷到⑥ → 立刻发出一根属于缇娜的羽毛',
+      mine, mine ? '出现过' : `没出现（steal：${st.map(e => e.skill).join('、') || '无'}）`);
+    check('⑥ 的 steal 事件没有 sustain 标记（= 放一次）',
+      !st.some(e => e.skill === '我很可爱' && e.sustain === true),
+      st.map(e => `${e.skill}${e.sustain ? '(借)' : ''}`).join('、') || '没有');
+  }
+
+  /* ---- 走真实流程：蝙蝠凑满魔力 → 偷到见晴① → 自动借用 ---- */
+  {
+    const b = mk(['tina_bat'], { foeId: 'jianqing', foeSkills: ['jianqing_mirror_def'], timeLimit: 40 });
+    const tina = b.units[0];
+    let sawBorrow = false;
+    for (let i = 0; i < 60 * 40 && !b.over; i++) {
+      b.step();
+      if (tina.borrow && tina.borrow['jianqing_mirror_def']) { sawBorrow = true; break; }
+    }
+    check('真流程：魔力满 5 偷到见晴① → 自动变成"借用 5 秒"',
+      sawBorrow, sawBorrow ? '已借用' : '没走到偷学那一步');
+    const st = ev(b, 'steal');
+    check('steal 事件标了 sustain（区分"放一次"与"借用"）',
+      st.length > 0 && st.some(e => e.sustain === true && e.value === 1),
+      st.map(e => `${e.skill}${e.sustain ? '(借)' : ''}`).join('、') || '没有');
+  }
+}
+
 /* ============ ③ 魔力霰弹 ============ */
 console.log('\n【③】魔力霰弹');
 {
@@ -356,11 +591,24 @@ console.log('\n【⑤】公主传承1 · 时间停止');
     Math.abs(foe3.skillCd.test_shot - cd0) < 1e-9,
     `${cd0.toFixed(3)} → ${foe3.skillCd.test_shot.toFixed(3)}`);
 
-  /* 持续伤害照跳：给对手挂一个灼烧伤害区，看它掉不掉血 */
-  const b4 = mk(['tina_p1'], { arenaId: 'lava_center', timeLimit: 12 });
+  /* 持续伤害照跳：给对手挂一个灼烧伤害区，看它掉不掉血。
+     具体场地已按作者要求从目录里删掉，所以这里**就地合成**一块灼烧区
+     （引擎的 zones 能力还在）—— 不然删场地等于把这条覆盖一起删了。 */
+  const b4 = mk(['tina_p1'], {
+    timeLimit: 12,
+    arena: {
+      ...ARENA_BY_ID.rect,
+      id: 'test_lava', name: '岩浆（合成）',
+      zones: [{
+        id: 'lava', name: '岩浆', type: 'damage', dps: 55,
+        shape: { kind: 'circle', cx: 360, cy: 220, r: 85 },
+        color: 'rgba(220,80,40,0.28)', edge: 'rgba(220,80,40,0.65)'
+      }]
+    }
+  });
   b4.step();
   const foe4 = b4.units[1];
-  /* 伤害区是圆心 (360,220) 半径 85 的一个圆（熔心斗场），
+  /* 伤害区是圆心 (360,220) 半径 85 的一个圆，
      对手的出生点在区外 —— 先把它挪进岩浆里，否则测的是"站在安全区不掉血"。
      世界坐标 → 定点：乘 SCALE。 */
   const zone = b4.arena.zones.find(z => z.type === 'damage');

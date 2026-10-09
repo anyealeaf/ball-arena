@@ -1,4 +1,5 @@
 /* 上线前自检：导入路径 + 模块加载 + DOM 依赖 + 常见浏览器错误 */
+import './lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';

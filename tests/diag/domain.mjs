@@ -8,6 +8,7 @@
  *
  * 用法：node tests/diag/domain.mjs
  */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, SPECIES_BY_ID, makeUnitStats, SCALE } from '../../js/balls.js';
@@ -113,6 +114,40 @@ console.log('\n【1】激活与静态量');
   /* 没装领域的球，不该有任何领域层 */
   const b2 = mk(['yuncai_modan']);
   check('没装辉光领域时不画领域层', b2.aurora === false && !b2.auroraStyle);
+}
+
+/* ============ 1.5 析光的分身不该把领域关掉 ============ */
+console.log('\n【1.5】分身出生后领域仍然在');
+{
+  /* 踩过的坑：析光的分身也带「辉光领域」（它继承本体的技能），
+     于是分身的被动又跑一遍 —— 而早期 _spawnSummon 漏拷了 `domain` 字段，
+     分身就把 battle.auroraStyle 覆盖成 null → **整场极光当场消失**，
+     同时 auroraAt 被改成"现在"，气浪还会从分身那一侧重放一次。
+     这条断言同时守着两件事：分身有自己的 domain、领域层不被重写。 */
+  const b = mk(['yuncai_domain', 'yuncai_xiguang'], { timeLimit: 40 });
+  const before = { at: b.auroraAt, style: b.auroraStyle };
+  check('（前置）开局领域已激活', b.aurora === true && !!b.auroraStyle);
+
+  let summonAt = -1;
+  for (let i = 0; i < 60 * 40 && !b.over; i++) {
+    b.step();
+    if (summonAt < 0) {
+      const ev = b.events.find(e => e.type === 'summon');
+      if (ev) summonAt = ev.f;
+    }
+  }
+  check('这一局确实召唤出了分身（否则这条测不到东西）', summonAt >= 0,
+    summonAt >= 0 ? `第 ${summonAt} 帧` : '没出现 summon 事件');
+
+  const clone = b.units.find(u => u.summoner !== undefined);
+  check('分身身上带着领域配置（漏拷的话它会关掉整场极光）',
+    !!clone && !!clone.domain && clone.domain.src === CFG.src,
+    clone ? String(clone.domain && clone.domain.src) : '没有分身');
+  check('分身出生后领域层还在（没被覆盖成 null）',
+    !!b.auroraStyle && b.auroraStyle.src === before.style.src,
+    b.auroraStyle ? b.auroraStyle.src : 'null');
+  check('气浪不会因为分身出生而重放（auroraAt 不变）',
+    b.auroraAt === before.at, `${before.at} → ${b.auroraAt}`);
 }
 
 /* ============ 2. 展开：气浪半径随时间铺开 ============ */

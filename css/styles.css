@@ -28,6 +28,18 @@ html, body {
 button { font: inherit; cursor: pointer; }
 input, select, textarea { font: inherit; }
 
+/* ---------- `hidden` 必须真的藏起来（踩过一次的坑，别删）----------
+   HTML 的 `hidden` 属性靠**浏览器默认样式** `[hidden]{display:none}` 生效，
+   而作者样式任意一条 `display: …` 的优先级都比默认样式高 ——
+   于是在 `.lottery-layer { display: flex }` 上加 `hidden` 完全没用：
+   那块"90% 白纱 + 背景模糊"的抽签层一直盖在战斗画面上，
+   表现为"整个画面发白、发糊"，看着像渲染坏了（排查了半天，还怀疑过辉光领域）。
+
+   一条全局规则把这个陷阱堵死：以后谁再给某个元素写 `display`，
+   顺便用 `hidden` 控制显隐也不会失效。
+   `!important` 是必要的 —— 否则还是会被更高优先级的作者样式压过去。 */
+[hidden] { display: none !important; }
+
 /* ---------- 版式 ---------- */
 .app { max-width: 1180px; margin: 0 auto; padding: 18px 16px 72px; }
 
@@ -185,6 +197,24 @@ p.lead { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
 .chk .t { font-weight: 600; font-size: 13.5px; }
 .chk .d { color: var(--muted); font-size: 12px; }
 
+/* 技能规则（无限火力 / 随机技能）：放在"参与小球"卡片里，
+   因为它直接决定"技能怎么来"。底色与选项区区分开，一眼能看出是规则而不是球。 */
+.skill-rules {
+  background: var(--paper2);
+  border: 1px solid var(--line2);
+  border-radius: 9px;
+  padding: 2px 10px;
+  margin: 0 0 12px;
+}
+.skill-rules .chk { padding: 8px 0; }
+.skill-rules .chk .t { font-size: 13px; }
+.skill-rules .chk .d { line-height: 1.5; }
+
+/* 「详细设置」面板里的小节标题 */
+.subhead { font-weight: 600; font-size: 13.5px; }
+/* 展开状态下的按钮：跟 seg 的选中态同一套观感 */
+.btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
 .field { margin-bottom: 10px; }
 .field label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
 .field select, .field input[type=number] {
@@ -212,6 +242,84 @@ p.lead { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
 
 .playbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 .timeline { flex: 1; min-width: 140px; }
+
+/* ---------- 战前抽技能（三格老虎机）----------
+   盖在画布上的一个层：position 靠 .stage 撑起来（画布自己撑高度）。
+   **默认 `display:none`，只有加了 `.show` 才显示** ——
+   不靠 `hidden` 属性控制显隐，免得再踩"作者样式压过 [hidden]"那个坑
+   （见文件开头那条全局规则）。 */
+.stage { position: relative; }
+.lottery-layer {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(253, 252, 247, 0.9);
+  backdrop-filter: blur(1.5px);
+  z-index: 5;
+  padding: 10px;
+  overflow: auto;
+}
+.lottery-layer.show { display: flex; }
+.lottery-box {
+  max-width: 100%;
+  text-align: center;
+}
+.lottery-title {
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 10px;
+  letter-spacing: .04em;
+}
+.lottery-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.lottery-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 9px 11px;
+  min-width: 190px;
+}
+.lottery-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.lottery-who .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.lottery-reels { display: flex; gap: 6px; justify-content: center; }
+.reel {
+  min-width: 74px;
+  padding: 7px 8px;
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  background: var(--paper2);
+  font-size: 12.5px;
+  font-weight: 600;
+  min-height: 33px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+/* 停下那一格：变实、跳一下 —— 让人知道"这一格定了" */
+.reel.done { background: var(--accent); color: #fff; border-color: var(--accent); }
+.reel.pop { animation: reelPop .18s ease-out; }
+@keyframes reelPop {
+  0% { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+.lottery-pool { margin-top: 8px; font-size: 11px; line-height: 1.45; }
+.lottery-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.lottery-box.settled .reel { box-shadow: 0 0 0 3px rgba(58, 53, 42, .08); }
 .timeline input[type=range] { width: 100%; }
 
 .hp-strip { display: flex; flex-direction: column; gap: 5px; }
@@ -243,3 +351,106 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 table.tbl th, table.tbl td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line2); }
 table.tbl th { color: var(--muted); font-weight: 600; }
 table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------- 「素材已更新 · 点击刷新」小条 ----------
+   编辑器在另一个标签页里保存之后，游戏页靠它提醒作者刷新
+   （引擎只在页面加载时读一次配置，不刷新等于没改）。
+   和抽签层一样：**默认 display:none，加 .show 才出现** ——
+   绝不用 `hidden` 属性（那条坑见文件开头）。 */
+.asset-toast {
+  display: none;
+  position: fixed; right: 16px; bottom: 16px; z-index: 40;
+  max-width: 380px; padding: 10px 12px;
+  background: var(--paper); border: 1px solid var(--line);
+  border-radius: 11px; box-shadow: 0 8px 24px rgba(0,0,0,.14);
+}
+.asset-toast.show { display: block; }
+.asset-toast .at-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.asset-toast .at-sum {
+  max-height: 70px; overflow: auto; margin: 4px 0 8px;
+  padding: 6px 8px; border-radius: 7px;
+  background: var(--paper2); border: 1px solid var(--line2);
+  color: var(--muted); white-space: pre-wrap;
+}
+.asset-toast .at-btns { display: flex; gap: 8px; }
+
+/* ---------- 玩家操控 · 技能按键 ----------
+   准备界面里"哪一个键放哪一个主动技能"的清单。
+   键位按钮要一眼看出"可以点它改键"，所以做成一枚小键帽的样子。 */
+.keybind-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; }
+.keybind-row { display: flex; align-items: center; gap: 4px; }
+.kb-key {
+  font: inherit; font-size: 12px; cursor: pointer;
+  padding: 3px 9px; min-width: 46px;
+  border: 1px solid var(--line); border-bottom-width: 2px;
+  border-radius: 6px; background: #fff; color: var(--ink);
+}
+.kb-key:hover { background: var(--paper2); }
+.kb-key.capturing { background: #fff7d6; border-color: var(--warn, #d9a441); }
+.kb-del {
+  font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+  padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; color: var(--muted);
+}
+.kb-del:hover { color: var(--bad); border-color: var(--bad); }
+.keybind-map { line-height: 1.7; }
+.keybind-map .kb-slot { color: var(--muted); }
+.keybind-map .kb-none { color: var(--bad); }
+
+/* ---------- 玩家技能栏（战斗界面 · 战场下方） ----------
+   实时操控时才有：显示"哪个键放哪个技能、还差几秒"。
+   冷却用一条从右向左退去的填充表示（比数字更快看懂）。
+   ⚠ 它**不能盖在画布上**：一开始放在 .stage 里做过绝对定位，
+   结果它挡住了战场下沿那条带 —— 打到下面去的球和弹道"看不见了"。
+   现在它是画布下方的一行（不参与覆盖）。 */
+.ctrl-hud {
+  margin-top: 8px;
+  padding: 8px 10px; border-radius: 10px;
+  background: rgba(28, 26, 22, 0.10); color: var(--ink);
+  border: 1px solid var(--line2);
+  font-size: 12.5px; line-height: 1.5;
+}
+.ctrl-hud[hidden] { display: none; }
+.ctrl-hud .ch-head { margin-bottom: 6px; }
+.ctrl-hud .ch-head b { color: var(--ink); }
+.ctrl-hud .ch-over { color: var(--bad); }
+.ctrl-hud .ch-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.ctrl-hud .ch-slot {
+  position: relative; overflow: hidden;
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 3px 9px 3px 6px; border-radius: 7px;
+  background: #fff; border: 1px solid var(--line);
+  opacity: 0.62;
+}
+.ctrl-hud .ch-slot.ready { opacity: 1; border-color: #b58b2a; box-shadow: 0 0 0 2px rgba(217,164,65,.18); }
+.ctrl-hud .ch-slot.unbound { border-style: dashed; }
+.ctrl-hud .ch-key {
+  display: inline-block; min-width: 26px; padding: 0 4px; border-radius: 4px;
+  background: var(--paper2); color: var(--ink); font-size: 11.5px; text-align: center;
+  border-bottom: 1px solid var(--line);
+}
+.ctrl-hud .ch-cd { font-style: normal; color: var(--bad); }
+.ctrl-hud .ch-slot.ready .ch-cd { color: #159c6b; }
+.ctrl-hud .ch-fill {
+  position: absolute; left: 0; bottom: 0; height: 2px;
+  background: #159c6b; transition: width .1s linear;
+}
+.ctrl-hud .ch-auto { margin-top: 5px; color: var(--muted); }
+
+/* ---------- 「斗蛐蛐开始」遮罩 ----------
+   进战斗界面先不跑：等玩家点按钮才真正开打（作者 2026-10 的要求）。
+   和抽签层一样：默认 display:none，加 .show 才出现 ——
+   绝不用 hidden 属性（那条坑见文件开头）。 */
+.start-layer {
+  position: absolute; inset: 0; z-index: 6;
+  display: none; align-items: center; justify-content: center;
+  background: rgba(253, 252, 247, 0.72);
+  backdrop-filter: blur(1.5px);
+}
+.start-layer.show { display: flex; }
+.start-box { text-align: center; padding: 14px 22px; }
+.start-title {
+  font-weight: 700; font-size: 22px; letter-spacing: .12em;
+  margin-bottom: 6px; color: var(--ink);
+}
+.start-box .btn { margin-top: 10px; font-size: 15px; padding: 8px 22px; }

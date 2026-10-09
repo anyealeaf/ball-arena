@@ -165,6 +165,12 @@ const TEXT_EXT = new Set(['.html', '.css', '.js', '.mjs', '.json', '.txt', '.md'
    保留规则只认"文件名以 preview- 开头且是 png" —— 万一以后真有一张
    叫别名的正式图，不会被误伤。 */
 const isGeneratedPreview = (rel) => /(^|\/)preview-[^/]*\.png$/i.test(rel);
+/* 备份文件也不进仓库：
+   `.bak` 是「素材编辑器」写回源码前留的后悔药（改一个值就生成一份），
+   还有临时补丁脚本的 `._xxx.bak`。它们**不该被托管** ——
+   既不是站点资源，还会把旧版源码一起公开出去。
+   注意：本地**保留**它们（那是作者唯一的撤销手段），只是不上传。 */
+const isBackup = (rel) => /\.(bak|orig|tmp|swp)$/i.test(rel);
 const files = [];
 function walk(dir, base) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -173,7 +179,9 @@ function walk(dir, base) {
     const full = path.join(dir, e.name);
     const rel = base ? base + '/' + e.name : e.name;
     if (e.isDirectory()) walk(full, rel);
-    else if (!isGeneratedPreview(rel)) files.push({ rel, full, text: TEXT_EXT.has(path.extname(e.name).toLowerCase()) });
+    else if (!isGeneratedPreview(rel) && !isBackup(rel)) {
+      files.push({ rel, full, text: TEXT_EXT.has(path.extname(e.name).toLowerCase()) });
+    }
   }
 }
 

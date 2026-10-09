@@ -13,6 +13,8 @@ import { SCALE, DT, WORLD_W, WORLD_H } from './balls.js';
 import { teamColor } from './balls.js';
 import { effectiveShape, pointInZone, arenaBounds } from './arenas.js';
 import { SNAP_STRIDE, PROJ_STRIDE, FIELD_STRIDE } from './core.js';
+/* 伤害 → 力度权重：飘字的大小和打击音的轻重**共用同一套刻度**（见 DMG_* 注释） */
+import { hitWeight } from './audio.js';
 
 const FONT = '"Segoe UI","Microsoft YaHei",system-ui,sans-serif';
 
@@ -24,9 +26,113 @@ const FONT = '"Segoe UI","Microsoft YaHei",system-ui,sans-serif';
      再叠白色高光核心线         →  正中心约 94%
    要让整道光柱更透，调这一个数就行（柔光与核心都按比例跟着走）；
    如果只是嫌正中间那条白线太亮，调 BEAM_CORE。 */
-const BEAM_ALPHA = 0.75;
+export const BEAM_ALPHA = 0.75;
 const BEAM_GLOW = 0.28;      // 柔光外壳相对本体的比例
 const BEAM_CORE = 0.95;      // 中心高亮核心线相对本体的比例
+
+/* ---------- 开华（形态强化）的表现 ----------
+   作者 2026-10 的要求：「开华的时候特效稍微显眼一点，并且伴随轻微的屏幕抖动」。
+   分成两块：
+     · **一次性爆发**（bloom 事件）：三层彩色光环 + 中心闪光 + 放射细线，
+       比原来更亮更粗、持续更久（34 帧 ≈ 0.57 秒）；
+     · **常驻形态光晕**（开华之后的每一帧）：脚下旋转的极光弧 + 一层柔光底。
+   屏幕抖动见下面的 SHAKE_*。 */
+export const BLOOM_RING_ALPHA = 1.0;   // 三层光环的基准不透明度（原来最内层 0.85）
+export const BLOOM_RING_WIDTH = 6.5;   // 最内层线宽（原来 4，每层递减 1）
+export const BLOOM_FLASH_ALPHA = 0.5;  // 中心闪光的峰值不透明度
+export const BLOOM_GLOW_ALPHA = 0.34;  // 开华后脚下常驻柔光的强度（原来没有底光）
+export const BLOOM_ARC_ALPHA = 0.34;   // 常驻旋转弧的基准不透明度（原来 0.18）
+export const BLOOM_LIFE = 34;          // 这次爆发持续多少帧（普通事件是 22）
+
+/* 屏幕抖动：只在**开华那一瞬间**轻微晃一下。
+   位移按"距离开华帧数"衰减，所以它完全由帧号 + 事件推出来 ——
+   不用墙上时钟，暂停会冻在那一帧、拖进度条也会跟着回到同一状态（渲染层的铁律）。 */
+export const SHAKE_MAX = 3.2;    // 最大位移（世界单位；场地宽 720，约 0.4%）
+export const SHAKE_FRAMES = 20;  // 抖多久（20 帧 ≈ 0.33 秒）
+export const SHAKE_HZ = 14;      // 抖动的来回频率
+
+/* ---------- 见晴（白水仙）：水镜三态 + 起飞 ----------
+   作者还没给见晴美术，所以这一整块都是**程序化**表现：
+     · 水镜外圈：小球边缘一圈的颜色 = 当前形态（淡绿 / 淡粉 / 深蓝紫 / 白）；
+     · 猩红长剑：一根深红色光柱贴在球缘，随移动方向转（挥动时另有事件动画）；
+     · 护盾：水镜护盾 > 0 时球外一圈柔光（护盾值本身走资源条）；
+     · 起飞：虚化 + 变大 + 下方影子（近大远小），这是作者明确要求的观感。
+   全部由快照（16/17 颜色、18 状态位）与事件流驱动，所以暂停/回放都对得上。 */
+export const MIRROR_RING_W = 3.4;      // 水镜外圈的线宽
+export const MIRROR_RING_GAP = 3.2;    // 外圈离球面多远
+export const FLY_SCALE = 1.35;         // 飞行中的显示放大（判定箱不变）
+export const FLY_ALPHA = 0.55;         // 飞行中的"虚化"透明度
+export const FLY_SHADOW_ALPHA = 0.22;  // 影子的浓度
+export const SHIELD_ALPHA = 0.30;      // 护盾柔光的峰值
+export const SWORD_W = 4.5;            // 长剑（深红光柱）的粗细
+/** 挥动动画默认帧数（事件没带 swingFrames 时用这个） */
+export const SWORD_SWING_FRAMES = 12;
+const MIRROR_COLORS = {
+  1: '#86efac',   // ① 淡绿
+  2: '#f9a8d4',   // ① 淡粉
+  3: '#5b21b6',   // ③ 深蓝紫
+  4: '#ffffff',   // ③ 白
+};
+const SWORD_COLOR = '#8b1a1a';         // ② 猩红（暂时用深红光柱替代美术）
+
+/* ---------- 伤害飘字 ----------
+   作者 2026-10 的要求：「加大加粗伤害文字，把伤害文字改为显眼一些的红色」。
+   原来是最普通的深灰 `bold 12px`。这一版做了四件事：
+     · **更大更粗**（DMG_FONT_PX / DMG_WEIGHT）；
+     · **鲜红 + 浅色描边**：场地是浅色方格纸、球又是深色贴图，
+       纯红字压在深色球面上会糊、压在纸上会飘 —— 那圈浅色描边才是
+       "显眼"的真正来源，填充色只负责"是红的"；
+     · **出现瞬间放大再收回**（DMG_POP → 1，DMG_POP_FRAMES 帧内），
+       让数字像是被打出来的，而不是浮在那里的；
+     · **伤害越高字越大**（DMG_SIZE_GAIN，设 0 = 关掉，回到统一字号）。
+   字号用的权重来自 audio.js 的 hitWeight() —— 和打击音是同一套刻度，
+   否则同一下重击会出现"看起来比听起来轻"的错位。 */
+export const DMG_FONT_PX = 19;         // 基准字号（原来 12）
+export const DMG_WEIGHT = 800;         // 字体粗细（原来 bold ≈ 700）
+export const DMG_COLOR = '#e11d1d';    // 填充色：鲜红
+export const DMG_OUTLINE = '#fffdf8';  // 描边色：和场地纸同色系的浅色
+export const DMG_OUTLINE_W = 3.4;      // 描边宽度（0 = 不描边）
+export const DMG_SIZE_GAIN = 0.4;      // 满权重时字号再放大这么多倍（0 = 不随伤害变）
+export const DMG_RISE = 24;            // 飘字上升距离（世界单位，原来 20）
+export const DMG_POP = 1.35;           // 出现那一瞬间的放大倍数
+export const DMG_POP_FRAMES = 7;       // 放大用几帧收回 1.0
+const DMG_ALPHA = 0.95;                // 飘字自身的不透明度（再乘事件淡出）
+
+/* ---------- 贴图弹道：光效环绕 + （只给蝙蝠的）透明度呼吸 ----------
+   都只作用于**贴图弹道**（箭矢 / 蝙蝠 / 能量弹）：
+
+   ① **光效环绕**：对应颜色的半透明光晕，椭圆、贴着图的形状
+      （箭是长条、弹是圆球，用圆会把长箭裹成一大团）。
+      颜色按弹道种类给（各技能的 `spriteGlow`），画在图**下面**，不糊图。
+
+   ② **透明度呼吸**：**只有配了 `spritePulse` 的弹道才有**（目前只有蝙蝠）。
+      作者的要求是"只有蝙蝠有透明度呼吸效果，其他特效均不要"，
+      所以这是一个**显式开关**，不是全局行为：
+        · 配了 → 图与光晕的不透明度在 PROJ_ALPHA_MIN ~ MAX 之间来回浮动；
+        · 没配 → 图完全不透明（1.0）、光晕取峰值常数，整枚弹道一动不动。
+
+   ⚠ 光晕颜色必须挑**中等饱和度**的：场地背景是浅色方格纸（#fdfcf7），
+   淡白的光晕在白纸上等于没画。 */
+export const PROJ_ALPHA_MIN = 0.25;    // 呼吸区间（作者定，只对配了 spritePulse 的弹道生效）
+export const PROJ_ALPHA_MAX = 0.40;
+export const PROJ_PULSE_HZ = 1.1;      // 每秒呼吸几个来回
+export const PROJ_GLOW_ALPHA = 0.30;   // 光晕中心的不透明度峰值（"不用做太过强烈"）
+export const PROJ_GLOW_RX = 0.55;      // 光晕半长轴 ÷ 图长
+export const PROJ_GLOW_RY = 0.95;      // 光晕半短轴 ÷ 图高
+export const PROJ_GLOW_FLOOR = 0.45;   // 呼吸时，光晕暗到峰值的这个比例为止
+
+/** 呼吸相位 0~1（用 cos 的半波，两端都真的能取到）。
+ *
+ *  相位用**帧号**算，不用墙上时钟 —— 渲染层只读快照（见文件头），
+ *  用 performance.now() 的话一暂停弹道就继续明暗闪，拖进度条也回不到同一帧的样子。
+ *
+ *  `seed` 让同一种弹道里的几只各呼吸各的：不加偏移的话同时在场的几只
+ *  会一起明暗，看起来是"画面在闪"，而不是"每只在呼吸"。 */
+function pulseAt(frame, hz, seed) {
+  const f = hz > 0 ? hz : PROJ_PULSE_HZ;
+  const off = (seed || 0) * 0.37;
+  return 0.5 - 0.5 * Math.cos((frame / 60 + off) * f * Math.PI * 2);
+}
 
 
 /* 把 #rgb / #rrggbb 颜色转成带透明度的 rgba()。
@@ -50,6 +156,12 @@ function hexA(color, a) {
    ------------------------------------------------------------ */
 const stickerCache = new Map();
 
+/** 诊断用：已经登记过的贴图路径（"这枚弹道/这张球贴图为什么不显示"全靠它）。
+ *  渲染层对没就绪的贴图是"宁可不画"，所以"路径在不在表里"是第一个要查的事。 */
+export function stickerPaths() {
+  return [...stickerCache.keys()];
+}
+
 function getSticker(src) {
   // 无头/测试环境没有 Image 构造器：直接返回 null，渲染层回退纯色圆
   if (!src || typeof Image === 'undefined') return null;
@@ -63,6 +175,28 @@ function getSticker(src) {
   return entry;
 }
 
+/** 预加载整局用到的**弹道贴图**（箭矢 / 蝙蝠 / 能量弹…）。
+ *
+ *  为什么必须在"整局算完"之后调：弹道是模拟过程中才产生的，
+ *  `battle.projSpritePalette` 要跑完才有内容。而本项目恰好是
+ *  "先把整局算完、再推动播放头"，所以这时候能一次拿到全场用到的贴图。
+ *
+ *  ⚠ **玩家操控是实时推进的**（见 ui-battle.js），开战那一刻调这个函数时
+ *  弹药一枚都还没生出来 —— 于是那种弹道的贴图要等到"第一次开火的那一帧
+ *  才在绘制里现加载"，那一两帧只能画程序化光点（作者看到的就是
+ *  "手操时特效不对/像没了"）。所以实时模式里**每帧都要再补一次**
+ *  （见 ui-battle.js 的 `warmSprites()`）：调色板一长出新条目就立刻预热。
+ *
+ *  不预热会怎样：某种弹道**第一次出现的那一两帧什么都不画**
+ *  （渲染层对没加载好的贴图是"宁可不画，也不画个方块"），
+ *  看起来就像"第一发没有特效"。都是本地小图、加载很快，
+ *  但首次开火那一帧照样会空 —— 这是观感问题，不是性能问题。 */
+export function preloadProjSprites(battle) {
+  for (const e of (battle && battle.projSpritePalette) || []) {
+    if (e && e.src) getSticker(e.src);
+  }
+}
+
 /** 预加载一组球种用到的贴图（进入战斗前调用一次） */
 export function preloadStickers(speciesList) {
   for (const sp of speciesList || []) {
@@ -70,10 +204,20 @@ export function preloadStickers(speciesList) {
     // 形态切换的第二张贴图（如晕彩的开华形态）也要预热，否则切换瞬间会闪一下纯色圆
     if (sp && sp.stickerBloom && sp.stickerBloom.src) getSticker(sp.stickerBloom.src);
     /* 手持物件（弓）同理。多帧的话每一帧都要预热 ——
-       否则拉到某一帧才第一次去加载，会看到弓闪一下不见了。 */
+       否则拉到某一帧才第一次去加载，会看到弓闪一下不见了。
+       弓有两种写法：单一武器（src / frames）和多武器（kindArt + arts），
+       两种都走一遍，缺哪一种都不会在战斗中现加载。 */
     if (sp && sp.bow) {
-      if (sp.bow.src) getSticker(sp.bow.src);
-      for (const f of sp.bow.frames || []) if (f && f.src) getSticker(f.src);
+      const sets = (Array.isArray(sp.bow.arts) && sp.bow.arts.length) ? sp.bow.arts : [sp.bow];
+      for (const art of sets) {
+        if (!art) continue;
+        if (art.src) getSticker(art.src);
+        for (const f of art.frames || []) if (f && f.src) getSticker(f.src);
+        /* 每一式的四个动作位都要预热：idle / draw / shot / arrow */
+        for (const k of ['idle', 'draw', 'shot', 'arrow']) {
+          if (typeof art[k] === 'string') getSticker(art[k]);
+        }
+      }
     }
     /* 辉光领域的背景长图同理 —— 不预热的话展开动画会从"空白"开始，
        气浪扫过去一片空，等图加载完才补上。 */
@@ -94,12 +238,129 @@ function bowStateSrc(bow, castP) {
   return bow.draw;
 }
 
+/** 按 castKind 从 bow.kindArt 表里挑出这一式该用哪套美术。
+ *
+ *  背景：映霞[荣] 和 映霞[枯] 是同一只球的两个技能，长得完全不一样
+ *  （荣是粉弓、枯是墨色花枝弓），而弓的美术挂在**球种**上 ——
+ *  渲染层从球身上看不出当前放的是哪一式。
+ *  所以技能把 castKind（0 普通 / 1 五连发 / 2 枯）写进快照，
+ *  渲染层照 balls.js 的 kindArt 表查，两边共用同一张表。
+ *
+ *  bow 兼容两种写法：
+ *    单一武器  → 直接就是一套（有 idle / draw 那层）
+ *    多武器    → { kindArt: [...], arts: [...] }
+ *  单一写法原样返回；查不到（越界 / 表少写了一段）就回退第 0 套，
+ *  绝不返回 undefined 把渲染搞崩。 */
+export function pickBowArt(bow, castKind) {
+  if (!bow) return null;
+  const arts = bow.arts;
+  if (!Array.isArray(arts) || !arts.length) return bow;
+  const table = Array.isArray(bow.kindArt) ? bow.kindArt : null;
+  const k = castKind | 0;
+  /* 越界**不**夹到表的末项：末项是枯（花枝弓），而一个来路不明的
+     castKind 更可能是"普通施法"而不是"最后一式"，所以回退第 0 套。 */
+  const idx = (table && k >= 0 && k < table.length) ? (table[k] | 0) : 0;
+  if (!(idx >= 0 && idx < arts.length)) return arts[0];
+  return arts[idx];
+}
+
+/** 开华爆发的**几何参数**（纯函数，给定进度 t∈[0,1] 算出这一帧该画什么）。
+ *
+ *  为什么要单独抽出来：它有两个消费者 ——
+ *     · 渲染层（画到 canvas 上）；
+ *     · 离线预览 `tools/preview-bloom.mjs`（画成 PNG 给作者看）。
+ *  两边各写一份公式迟早会漂（本项目在"五连发扇形"上就吃过一次亏，
+ *  预览画的 14° 和真正飞出去的 24° 差了一倍）。所以公式只此一份。 */
+export function bloomBurstSpec(t) {
+  const k = Math.max(0, Math.min(1, t));
+  const cols = ['#a78bfa', '#7dd3fc', '#f0abfc'];
+  return {
+    /* 三层扩散光环：更粗更亮（作者要求"显眼一点"） */
+    rings: [0, 1, 2].map(i => ({
+      r: 12 + i * 9 + k * 58,
+      lw: BLOOM_RING_WIDTH - i * 1.6,
+      alpha: BLOOM_RING_ALPHA - i * 0.22,
+      color: cols[i]
+    })),
+    /* 中心闪光：只在最前 40% 里存在 */
+    flash: k < 0.4
+      ? { r: 10 + k * 70, alpha: BLOOM_FLASH_ALPHA * (1 - k / 0.4) }
+      : null,
+    /* 放射细线：8 根，从光环内侧往外推 */
+    rays: [0, 1, 2, 3, 4, 5, 6, 7].map(i => {
+      const a = (i / 8) * Math.PI * 2 + 0.2;
+      const r0 = 10 + k * 40;
+      return { a, r0, r1: r0 + 10 + k * 22 };
+    })
+  };
+}
+
+/** 五连发每一根箭相对瞄准方向的偏角（度），**跳过正中那一根**。 *
+ *  这条公式必须和 skills.js 真正发箭时用的那条逐根对齐 ——
+ *  画这个扇形的全部意义就是"预告这五发往哪飞"。两边各写一遍迟早会漂
+ *  （历史上就差过整整一倍：技能 24°，画出来 14°）。
+ *  所以这里导出成函数：渲染层、诊断（bow.mjs 拿它和真实弹道速度对）和
+ *  预览脚本（tools/preview-bow.mjs）都调它，谁都不再抄一份。
+ *
+ *  正中那一根（off = 0）要跳过：它已经画在 draw 那张图里了，
+ *  再画一根会和图上那支叠成两支。 */
+export function burstOffsetsDeg(burst) {
+  if (!burst || !(burst.count >= 2) || !(burst.spreadDeg > 0)) return [];
+  const out = [];
+  for (let k = 0; k < burst.count; k++) {
+    const off = ((k / (burst.count - 1)) * 2 - 1) * burst.spreadDeg;
+    if (Math.abs(off) < 1e-9) continue;
+    out.push(off);
+  }
+  return out;
+}
+
+/** 画一个伤害飘字。**游戏与素材编辑器的预览共用这一份**——
+ *  预览另抄一套公式的话，作者照着预览调完，实际打出来又是另一个样子
+ *  （本项目在"五连发扇形"上吃过一次亏：预览 14°、实际 24°）。
+ *
+ *  @param text      要画的字（一般是 `-66`）
+ *  @param x,y       飘字**当前**的位置（调用方算好上升偏移）
+ *  @param w         伤害权重 0~1（来自 hitWeight()，决定字号）
+ *  @param ageFrames 这个事件已经过去了几帧（只用来做出现瞬间的放大）
+ *  @param opts      可覆盖任意一个 DMG_*（素材编辑器预览用），
+ *                   另有 fade = 事件整体的淡出系数 */
+export function drawDamageNumber(ctx, text, x, y, w, ageFrames, opts = {}) {
+  const k = Math.max(0, Math.min(1, Number(w) || 0));
+  const px = (opts.px ?? DMG_FONT_PX) * (1 + (opts.sizeGain ?? DMG_SIZE_GAIN) * k);
+  const popTo = opts.pop ?? DMG_POP;
+  const popFrames = Math.max(1e-6, opts.popFrames ?? DMG_POP_FRAMES);
+  const pop = 1 + (popTo - 1) * Math.max(0, 1 - Math.max(0, ageFrames) / popFrames);
+  ctx.save();
+  ctx.globalAlpha = DMG_ALPHA * (opts.fade ?? 1);
+  ctx.translate(x, y);
+  ctx.scale(pop, pop);
+  ctx.font = `${opts.weight ?? DMG_WEIGHT} ${px.toFixed(1)}px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  /* 描边要"圆角接头"，否则粗描边会在笔画尖角处支棱出小刺 */
+  ctx.lineJoin = 'round';
+  ctx.miterLimit = 2;
+  const ow = opts.outlineW ?? DMG_OUTLINE_W;
+  if (ow > 0) {
+    ctx.lineWidth = ow;
+    ctx.strokeStyle = opts.outline ?? DMG_OUTLINE;
+    ctx.strokeText(text, 0, 0);
+  }
+  ctx.fillStyle = opts.color ?? DMG_COLOR;
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
 export class Renderer {
   constructor(canvas) {
     this.cv = canvas;
     this.ctx = canvas.getContext('2d');
     this.showDamage = true;
     this.showHud = true;      // 是否显示血条/资源条
+    /* 屏幕抖动开关（开华那一下）。战斗界面控制条上有勾选框，
+       对应 prefs 里的"屏幕抖动" —— 有人不喜欢镜头晃，给个开关。 */
+    this.screenShake = true;
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
     /* 场地大小：小场地会被放大铺满画布，避免四周留一大圈空白。
        渲染坐标恒为 0..WORLD_W / 0..WORLD_H，缩放交给 canvas 变换。 */
@@ -202,12 +463,151 @@ export class Renderer {
     this.resize();
   }
 
+  /* ---------- 屏幕 ⇄ 世界（玩家用鼠标瞄准时要它） ----------
+     CSS 像素 → 世界单位。换算链与 draw() 里那套必须**完全互逆**：
+       · 缓冲区坐标 = CSS 坐标 × (cv.width / cssW)
+       · 世界坐标   = 缓冲区坐标 ÷ camScale + cam 原点
+     这里直接用「一个 CSS 像素等于多少世界单位」一步到位：
+     cssW 个 CSS 像素正好铺满 boxW 个世界单位。 */
+  screenToWorld(clientX, clientY) {
+    const cv = this.cv;
+    const r = cv.getBoundingClientRect();
+    const cssW = r.width || this.cssW || 1;
+    const cssH = r.height || this.cssH || 1;
+    return {
+      x: this.camX + ((clientX - r.left) / cssW) * (this.boxW || WORLD_W),
+      y: this.camY + ((clientY - r.top) / cssH) * (this.boxH || WORLD_H),
+    };
+  }
+
+  /** 玩家瞄准指示：从自己的球到鼠标一条细虚线 + 鼠标处一个准星。
+   *  画在 draw() 之后（自己重设一次变换），所以不受绘制顺序影响。
+   *  ⚠ 用的是 draw() **记录下来的** _usedScale/_usedCam（含屏幕抖动），
+   *  和刚刚那一帧画出来的东西严格对齐。 */
+  drawAim(world, opts = {}) {
+    const ctx = this.ctx;
+    if (!ctx || !world) return;
+    const s = this._usedScale || this.camScale || 1;
+    const camX = (this._usedCamX ?? this.camX) ?? 0;
+    const camY = (this._usedCamY ?? this.camY) ?? 0;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(s, s);
+    ctx.translate(-camX + (this.shakeX || 0), -camY + (this.shakeY || 0));
+    /* 世界里线宽是"世界单位"，所以要按 s 缩小 —— 否则 1px 线在高分屏上会变粗 */
+    const px = 1 / s;
+    const from = opts.from;
+    ctx.strokeStyle = opts.color || 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = px * 1.4;
+    ctx.setLineDash([px * 6, px * 6]);
+    if (from) {
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(world.x, world.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(world.x, world.y, px * 9, 0, Math.PI * 2);
+    ctx.lineWidth = px * 1.6;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(world.x - px * 13, world.y); ctx.lineTo(world.x - px * 4, world.y);
+    ctx.moveTo(world.x + px * 4, world.y); ctx.lineTo(world.x + px * 13, world.y);
+    ctx.moveTo(world.x, world.y - px * 13); ctx.lineTo(world.x, world.y - px * 4);
+    ctx.moveTo(world.x, world.y + px * 4); ctx.lineTo(world.x, world.y + px * 13);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   /** 世界坐标是否在视野内（用于剔除） */
   get viewW() { return this.boxW || WORLD_W; }
   get viewH() { return this.boxH || WORLD_H; }
 
-  /* ---------- 主绘制入口 ----------
-     frame: 播放头所在帧号（可能小于 battle.frame，实现回放）
+  /** 屏幕抖动：只在**开华那一瞬间**轻微晃一下。
+   *
+   *  两条硬要求：
+   *   1. **跟着帧号算，不跟墙上时钟** —— 渲染层只读快照（见文件头）。
+   *      用 performance.now() 的话，一暂停画面就继续晃、拖进度条也回不到同一帧的样子。
+   *   2. **不叠加**：几个晕彩同时开华时取最强的那一次，而不是把位移加起来 ——
+   *      加起来会变成"晃得看不清"，而作者要的是"轻微"。
+   *
+   *  开华事件的帧号缓存一份：事件流最多 6000 条，每帧全扫一遍没必要。
+   *  缓存键带上事件条数，所以战斗中新增事件（析光召唤等）会自动失效重建。 */
+  _screenShake(battle, f) {
+    if (!this.screenShake) return { x: 0, y: 0, amp: 0 };
+    const evs = battle.events || [];
+    let cache = this._shakeCache;
+    if (!cache || cache.battle !== battle || cache.n !== evs.length) {
+      cache = this._shakeCache = {
+        battle, n: evs.length,
+        frames: evs.filter(e => e.type === 'bloom').map(e => e.f)
+      };
+    }
+    let amp = 0;
+    for (const bf of cache.frames) {
+      const age = f - bf;
+      if (age < 0 || age > SHAKE_FRAMES) continue;
+      const k = 1 - age / SHAKE_FRAMES;
+      amp = Math.max(amp, k * k);          // 取最强的一次，不累加
+    }
+    if (amp <= 0) return { x: 0, y: 0, amp: 0 };
+    const ph = (f / 60) * SHAKE_HZ * Math.PI * 2;
+    return {
+      x: Math.sin(ph) * SHAKE_MAX * amp,
+      y: Math.cos(ph * 1.37) * SHAKE_MAX * 0.7 * amp,
+      amp
+    };
+  }
+
+  /** 取"这一帧某个单位正在挥的那一剑"（没有就返回 null）。
+   *
+   *  为什么要缓存：`battle.events` 可以有几千条，每帧每个球都线性扫一遍
+   *  是白花钱 —— 和上面 `_screenShake` 同一个做法：事件流**只增不改**，
+   *  所以按 battle 缓存一份索引就够（缓存键带上事件条数，新增事件会自动重建）。
+   *
+   *  返回 { angle, sweep, len, kind, t }：t 从 0（刚挥出）到 1（收招）。
+   *  挥动的**判定**在引擎那一帧就结算完了，这里纯粹是"补一段看得见的动作" ——
+   *  所以它是表现层的东西，靠帧号驱动，暂停会冻住、回放会跟着倒回去。
+   *  （作者 2026-10 的要求：长剑挥动时要**以小球原点为轴**转起来。） */
+  _swordSwingAt(battle, unitIdx, frame) {
+    const evs = battle.events || [];
+    if (this._swingOwner !== battle || this._swingN !== evs.length) {
+      this._swingOwner = battle;
+      this._swingN = evs.length;
+      const map = new Map();
+      for (const e of evs) {
+        if (e.type !== 'swordSwing' || !(e.a >= 0)) continue;
+        let list = map.get(e.a);
+        if (!list) map.set(e.a, (list = []));
+        list.push({
+          f: e.f,
+          angle: e.angle || 0,
+          sweep: ((e.sweepDeg != null ? e.sweepDeg : 120) * Math.PI) / 180,
+          len: e.swordLen || 0,
+          kind: e.kind || 'attack',
+          frames: e.swingFrames || SWORD_SWING_FRAMES,
+        });
+      }
+      this._swingMap = map;
+    }
+    const list = this._swingMap.get(unitIdx);
+    if (!list) return null;
+    /* 从后往前找最近的一次挥动（列表按帧号天然递增） */
+    for (let i = list.length - 1; i >= 0; i--) {
+      const s = list[i];
+      if (s.f > frame) continue;
+      const age = frame - s.f;
+      if (age > s.frames) return null;
+      return {
+        angle: s.angle, sweep: s.sweep, len: s.len, kind: s.kind,
+        t: Math.max(0, Math.min(1, age / s.frames)),
+      };
+    }
+    return null;
+  }
+
+  /* ---------- 主绘制入口 ----------     frame: 播放头所在帧号（可能小于 battle.frame，实现回放）
   */
   draw(battle, frame, opts = {}) {
     const ctx = this.ctx;
@@ -227,9 +627,16 @@ export class Renderer {
     ctx.clearRect(0, 0, cv.width, cv.height);
     this._bg(ctx, cv.width, cv.height);   // 背景铺满整块画布（屏幕坐标系）
 
+    /* 屏幕抖动：整场（场地 + 球 + 特效）一起晃，像镜头被震了一下。
+       放在世界变换里，所以背景网格（屏幕坐标系）不动 —— 那正是"镜头晃、纸不动"的观感。 */
+    const shake = this._screenShake(battle, Math.min(frame, battle.snapshots.length - 1));
+    this.shakeX = shake.x;
+    this.shakeY = shake.y;
+    this.shakeAmp = shake.amp;
+
     ctx.save();
     ctx.scale(s, s);
-    ctx.translate(-camX, -camY);
+    ctx.translate(-camX + shake.x, -camY + shake.y);
 
     const snapIdx = Math.min(frame, battle.snapshots.length - 1);
     const snap = battle.snapshots[snapIdx];
@@ -534,9 +941,13 @@ export class Renderer {
   _events(ctx, battle, frame) {
     const LIFE = 22;
     for (const e of battle.events) {
+      /* 开华那一下刻意比普通事件**活得久**（34 帧 ≈ 0.57 秒）：
+         22 帧一闪就过去了，作者的要求是"稍微显眼一点"。
+         注意 t 也要用它自己的寿命算，否则光环会提前到达 t=1 而停滞。 */
+      const life = e.type === 'bloom' ? BLOOM_LIFE : LIFE;
       const age = frame - e.f;
-      if (age < 0 || age > LIFE) continue;
-      const t = age / LIFE;
+      if (age < 0 || age > life) continue;
+      const t = age / life;
       const alpha = 1 - t;
       ctx.save();
       ctx.globalAlpha = alpha;
@@ -550,12 +961,10 @@ export class Renderer {
         ctx.arc(e.bx, e.by, r, 0, Math.PI * 2);
         ctx.stroke();
         if (this.showDamage) {
-          ctx.globalAlpha = alpha * 0.95;
-          ctx.fillStyle = '#1f1c15';
-          ctx.font = `bold 12px ${FONT}`;
-          ctx.textAlign = 'center';
-          ctx.fillText(`-${Math.round(e.value)}`, e.bx, e.by - 14 - t * 20);
-          ctx.textAlign = 'left';
+          /* 伤害飘字：红的、粗的、带浅色描边，伤害越高越大（见 drawDamageNumber）。
+             位置比原来再高一点，免得那圈更粗的描边压到球身上。 */
+          drawDamageNumber(ctx, `-${Math.round(e.value)}`, e.bx, e.by - 20 - t * DMG_RISE,
+            hitWeight(e.value), age, { fade: alpha });
         }
       } else if (e.type === 'death') {
         ctx.globalAlpha = alpha * 0.8;
@@ -701,14 +1110,177 @@ export class Renderer {
           ctx.stroke();
         }
       } else if (e.type === 'bloom') {
-        /* 开华：三层彩色光环向外炸开（和极光同色系），强调"形态变了" */
-        const cols = ['#a78bfa', '#7dd3fc', '#f0abfc'];
-        for (let i = 0; i < 3; i++) {
-          ctx.globalAlpha = alpha * (0.85 - i * 0.2);
-          ctx.strokeStyle = cols[i];
-          ctx.lineWidth = 4 - i;
+        /* 开华：三层彩色光环向外炸开（和极光同色系），强调"形态变了"。
+           作者反馈"想更显眼一点"，所以这一版加了三样：
+             · 中心的**闪光圆盘**（径向渐变，爆开瞬间最亮，很快收掉）；
+             · 光环更亮更粗（见文件头的 BLOOM_* 常量）；
+             · 一圈**放射细线**，让"炸开"有方向感。
+           它的寿命比普通事件长（BLOOM_LIFE），否则 22 帧一闪就过去了。
+           几何全部来自 bloomBurstSpec —— 离线预览调的是同一个函数。 */
+        const spec = bloomBurstSpec(t);
+        if (spec.flash) {
+          const R = spec.flash.r, fa = spec.flash.alpha;
+          const g = ctx.createRadialGradient(e.ax, e.ay, 0, e.ax, e.ay, R);
+          g.addColorStop(0, `rgba(255,255,255,${fa.toFixed(3)})`);
+          g.addColorStop(0.4, `rgba(196,181,253,${(fa * 0.7).toFixed(3)})`);
+          g.addColorStop(1, 'rgba(167,139,250,0)');
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = g;
+          ctx.beginPath(); ctx.arc(e.ax, e.ay, R, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = alpha * 0.75;
+        ctx.strokeStyle = '#f5d0fe';
+        ctx.lineWidth = 2;
+        for (const ray of spec.rays) {
           ctx.beginPath();
-          ctx.arc(e.ax, e.ay, 12 + i * 9 + t * 48, 0, Math.PI * 2);
+          ctx.moveTo(e.ax + Math.cos(ray.a) * ray.r0, e.ay + Math.sin(ray.a) * ray.r0);
+          ctx.lineTo(e.ax + Math.cos(ray.a) * ray.r1, e.ay + Math.sin(ray.a) * ray.r1);
+          ctx.stroke();
+        }
+        for (const ring of spec.rings) {
+          ctx.globalAlpha = alpha * ring.alpha;
+          ctx.strokeStyle = ring.color;
+          ctx.lineWidth = ring.lw;
+          ctx.beginPath();
+          ctx.arc(e.ax, e.ay, ring.r, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      } else if (e.type === 'mirrorSwitch') {
+        /* 见晴①②③：水镜切换。
+           作者的原话是"身前出现一副水镜，见晴穿过水镜，小球边缘一圈的颜色发生变化" ——
+           所以这里画的是**球前方立着的一面镜子**：一个竖直的椭圆镜面，
+           边缘是新的形态颜色，往外撑开一点再淡出（她"穿过去"的那一下）。 */
+        const col = MIRROR_COLORS[e.value] || '#ffffff';
+        const fa = ((e.face ?? 0) * Math.PI) / 180;
+        const gap = 26 + t * 10;
+        const mx = e.ax + Math.cos(fa) * gap;
+        const my = e.ay + Math.sin(fa) * gap;
+        const rw = 6 + (1 - t) * 4;
+        const rh = 26 * (1 - t * 0.25);
+        ctx.globalAlpha = alpha * 0.85;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.ellipse(mx, my, rw, rh, fa, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = alpha * 0.28;
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        ctx.ellipse(mx, my, rw * 0.7, rh * 0.9, fa, 0, Math.PI * 2);
+        ctx.fill();
+        /* 球缘那一圈也要跟着亮一下（换色的"落点"） */
+        ctx.globalAlpha = alpha * 0.7;
+        ctx.beginPath();
+        ctx.arc(e.ax, e.ay, 16 + MIRROR_RING_GAP + t * 6, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (e.type === 'swordSwing') {
+        /* 见晴②：长剑挥动。扇形扫过那道弧 —— 
+           attack 是砍人（猩红），guard 是消除魔弹（更亮的白红）。 */
+        const guard = e.kind === 'guard';
+        const a0 = (e.angle || 0) - 0.9 + t * 0.5;
+        const len = e.swordLen || 32;
+        const rr = 16 + len;
+        ctx.globalAlpha = alpha * (guard ? 0.95 : 0.8);
+        ctx.strokeStyle = guard ? '#fecaca' : SWORD_COLOR;
+        ctx.lineWidth = guard ? 5 : 7;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.arc(e.ax, e.ay, rr * 0.85, a0, a0 + 1.5);
+        ctx.stroke();
+        ctx.globalAlpha = alpha * 0.5;
+        ctx.strokeStyle = '#fca5a5';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(e.ax, e.ay, rr * 1.05, a0, a0 + 1.5);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+      } else if (e.type === 'projPurge') {
+        /* 长剑扫掉的敌方弹道：一个小十字爆点（和普通命中区分开） */
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = e.color || '#fecaca';
+        ctx.lineWidth = 2.4;
+        const rr = 4 + t * 10;
+        ctx.beginPath();
+        ctx.moveTo(e.px - rr, e.py - rr); ctx.lineTo(e.px + rr, e.py + rr);
+        ctx.moveTo(e.px + rr, e.py - rr); ctx.lineTo(e.px - rr, e.py + rr);
+        ctx.stroke();
+      } else if (e.type === 'takeoff' || e.type === 'landing') {
+        /* 起飞 / 落地：两圈向外扩的羽毛色圆环 + 一对"翅膀"弧线。
+           takeoff 向外扩（离地），landing 向内收（落地）—— 方向就能读出来。 */
+        const up = e.type === 'takeoff';
+        const k = up ? t : 1 - t;
+        ctx.globalAlpha = alpha * 0.8;
+        ctx.strokeStyle = '#e0f2fe';
+        ctx.lineWidth = 2.6;
+        ctx.beginPath();
+        ctx.arc(e.ax, e.ay, 14 + k * 34, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = alpha * 0.55;
+        ctx.lineWidth = 2;
+        for (const s of [-1, 1]) {
+          const a0 = s > 0 ? -0.9 : Math.PI + 0.9;
+          ctx.beginPath();
+          ctx.arc(e.ax, e.ay, 20 + k * 26, a0 - 0.5, a0 + 0.5);
+          ctx.stroke();
+        }
+      } else if (e.type === 'flyUpgrade') {
+        /* 见晴飞完一次的永久成长（移速 +5 / 帧伤 +0.5）：一圈金色光环 + 三道上升的短线。
+           没有这个反馈的话，"每次飞完都更强"是玩家完全看不见的机制。 */
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2.6;
+        ctx.beginPath();
+        ctx.arc(e.ax, e.ay, 16 + t * 26, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = alpha * 0.75;
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 3; i++) {
+          const dx = (i - 1) * 7;
+          const y0 = e.ay + 14 - t * 18;
+          ctx.beginPath();
+          ctx.moveTo(e.ax + dx, y0);
+          ctx.lineTo(e.ax + dx, y0 - 9);
+          ctx.stroke();
+        }
+      } else if (e.type === 'featherHit') {
+        /* 羽毛命中：一小簇羽毛状的放射线 */
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.strokeStyle = '#bfe3ff';
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2 + 0.3;
+          const r0 = 4 + t * 6, r1 = 10 + t * 16;
+          ctx.beginPath();
+          ctx.moveTo(e.px + Math.cos(a) * r0, e.py + Math.sin(a) * r0);
+          ctx.lineTo(e.px + Math.cos(a) * r1, e.py + Math.sin(a) * r1);
+          ctx.stroke();
+        }
+      } else if (e.type === 'immune') {
+        /* 起飞期间被打到：一圈淡黄的"挡下"光环。
+           没有这个反馈的话，玩家只会看到"打了不掉血"，像是 bug。 */
+        ctx.globalAlpha = alpha * 0.7;
+        ctx.strokeStyle = '#fde68a';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(e.bx ?? e.ax, e.by ?? e.ay, 18 + t * 10, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (e.type === 'blocked') {
+        /* 护盾全额挡下：一层青色盾光闪一下 */
+        ctx.globalAlpha = alpha * 0.7;
+        ctx.strokeStyle = '#a5f3fc';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(e.bx ?? e.ax, e.by ?? e.ay, 20 + t * 8, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (e.type === 'shieldHit') {
+        /* 护盾吃到伤害：贴着球面的碎裂弧 */
+        ctx.globalAlpha = alpha * 0.85;
+        ctx.strokeStyle = '#f0abfc';
+        ctx.lineWidth = 3;
+        for (let i = 0; i < 3; i++) {
+          const a0 = (i / 3) * Math.PI * 2 + t * 2;
+          ctx.beginPath();
+          ctx.arc(e.ax, e.ay, 20 + i * 3, a0, a0 + 0.7);
           ctx.stroke();
         }
       } else if (e.type === 'stealth') {
@@ -754,14 +1326,11 @@ export class Renderer {
         ctx.lineWidth = 2.6;
         ctx.beginPath(); ctx.arc(e.ax, e.ay, 10 + t * 30, 0, Math.PI * 2); ctx.stroke();
       } else if (e.type === 'hpCost') {
-        // 血量代价：本体上方飘一个小小的 -N（用冷色，和伤害的红黑区分开）
+        // 血量代价：本体上方飘一个小小的 -N（用冷色、字号也小，和伤害的红字区分开）
         if (this.showDamage) {
-          ctx.globalAlpha = alpha * 0.9;
-          ctx.fillStyle = '#7c3aed';
-          ctx.font = `bold 11px ${FONT}`;
-          ctx.textAlign = 'center';
-          ctx.fillText(`-${Math.round(e.value)}`, e.ax, e.ay - 18 - t * 16);
-          ctx.textAlign = 'left';
+          drawDamageNumber(ctx, `-${Math.round(e.value)}`, e.ax, e.ay - 18 - t * 16, 0, age, {
+            fade: alpha * 0.9, px: 13, color: '#7c3aed', outlineW: 2.4, sizeGain: 0, pop: 1.15,
+          });
         }
       } else if (e.type === 'heal') {
         /* 回血：绿色的小十字往上飘。和伤害的深色数字明确区分开，
@@ -849,7 +1418,7 @@ export class Renderer {
       const x = pj[i], y = pj[i + 1], r = pj[i + 2];
       const lifeT = pj[i + 3];                 // 1 → 0
       const color = pal[pj[i + 4]] || '#7dd3fc';
-      const ptype = pj[i + 5];                 // 0 特效 / 1 实体 / 2 光束 / 3 锚定光柱
+      const ptype = pj[i + 5];                 // 0 特效 / 1 实体 / 2 光束 / 3 锚定光柱 / 4 羽毛
       const isBeam = ptype > 1.5;
       /* 锚定光柱（公主传承3）：从锚点**向前**画，长度由弹道自己带着。
          普通激光是"头部 + 身后拖影"，方向正好相反。 */
@@ -863,14 +1432,62 @@ export class Renderer {
         ? battle.projSpritePalette[sprIdx] : null;
 
       ctx.save();
+
+      /* ---------- 羽毛（见晴⑥）----------
+         没有美术，所以程序化画一根羽毛：一片沿飞行方向拉长的椭圆 +
+         中间一根羽轴 + 几根羽枝 + 外圈淡蓝柔光。它和别的弹道最大的不同是
+         "会拐弯"（追踪 + 反弹），所以画成有方向感的形状比画成圆点更好读。
+         ⚠ 这段必须在 dirX/dirY **读出来之后**（原先放在前面，踩了一个
+         TDZ 的坑：const 声明的变量在声明前使用会直接抛错）。 */
+      if (ptype > 3.5) {
+        const ang = Math.atan2(dirY, dirX);
+        const len = Math.max(10, r * 3.4);
+        const wid = Math.max(3.5, r * 1.2);
+        const fadeIn = lifeT < 0.25 ? lifeT / 0.25 : 1;
+        ctx.globalAlpha = 0.75 * fadeIn;
+        const g = ctx.createRadialGradient(x, y, 0, x, y, len * 0.9);
+        g.addColorStop(0, 'rgba(191,227,255,0.55)');
+        g.addColorStop(1, 'rgba(191,227,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x, y, len * 0.9, 0, Math.PI * 2); ctx.fill();
+        ctx.translate(x, y);
+        ctx.rotate(ang);
+        ctx.globalAlpha = 0.95 * fadeIn;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, len * 0.5, wid, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(-len * 0.5, 0); ctx.lineTo(len * 0.5, 0);
+        ctx.stroke();
+        /* 羽枝：几根斜线，一眼能认出是羽毛 */
+        ctx.lineWidth = 1;
+        for (let k = -2; k <= 2; k++) {
+          const px = k * len * 0.16;
+          ctx.beginPath();
+          ctx.moveTo(px, 0);
+          ctx.lineTo(px - len * 0.08, -wid * 0.9);
+          ctx.moveTo(px, 0);
+          ctx.lineTo(px - len * 0.08, wid * 0.9);
+          ctx.stroke();
+        }
+        ctx.restore();
+        continue;
+      }
+
       /* 接近寿命尽头时淡出，避免"啪"地凭空消失。
          实体弹比特效弹更实（不透明度更高、有描边）。 */
       const fade = lifeT < 0.25 ? lifeT / 0.25 : 1;
       const core = fade * (isBody ? 1 : 0.75);
 
-      /* 贴图弹道（箭矢）：有图就直接按飞行方向转着画，
+      /* 贴图弹道（箭矢 / 蝙蝠 / 能量弹）：有图就直接按飞行方向转着画，
          不再画程序化的光点。这样"搭在弓上的箭"和"飞出去的箭"
-         是同一张图，撒放那一瞬间接得上。 */
+         是同一张图，撒放那一瞬间接得上。
+         外面套一层**对应颜色的半透明光晕**；**只有配了 `spritePulse`
+         的弹道**（目前只有蝙蝠）图与光晕才会呼吸 —— 其余一律静止。
+         调数值看文件头那几个常量与各技能的 `spriteGlow` / `spritePulse`。 */
       if (spr && spr.src) {
         const st = getSticker(spr.src);
         if (st && st.ready && !st.failed) {
@@ -878,11 +1495,41 @@ export class Renderer {
           const ih = st.img.naturalHeight || st.img.height;
           const len = spr.len > 0 ? spr.len : r * 6;
           const hgt = len * (ih / iw);
-          ctx.globalAlpha = fade;
+          /* 呼吸：0 = 这一枚不呼吸（图全不透明、光晕取峰值常数）。
+             一个开关决定"谁在呼吸"，见文件头 —— 别在这里按种类写 if。 */
+          const pulse = spr.pulse ? pulseAt(snap.f || 0, PROJ_PULSE_HZ, sprIdx) : 1;
+          const artA = spr.pulse
+            ? PROJ_ALPHA_MIN + (PROJ_ALPHA_MAX - PROJ_ALPHA_MIN) * pulse
+            : 1;
+          /* 贴图相对**判定中心**的偏移（世界单位，弹道局部坐标：+x 朝前）。
+             判定中心 = 弹道位置（物理上就是它参与碰撞），所以"图偏了"记在这里；
+             0 = 图正好套在判定圆上。光晕要跟着图一起偏 ——
+             否则会出现"光在一个位置、图在另一个位置"。 */
+          const offX = spr.offX || 0, offY = spr.offY || 0;
           ctx.translate(x, y);
-          ctx.rotate(Math.atan2(dirY, dirX));
-          /* 箭图的中心对准弹道中心（碰撞按圆算，所以图要居中才不偏） */
-          ctx.drawImage(st.img, -len / 2, -hgt / 2, len, hgt);
+          ctx.rotate(Math.atan2(dirY, dirX));   // 光晕是椭圆，必须跟着转
+
+          /* ① 光晕：画在图下面，颜色按弹道种类给 */
+          if (spr.glow) {
+            const grx = Math.max(1, len * PROJ_GLOW_RX);
+            const gry = Math.max(1, hgt * PROJ_GLOW_RY);
+            /* 不呼吸的那些：pulse = 1 → 光晕恒为峰值（不动） */
+            const ga = PROJ_GLOW_ALPHA * fade * (PROJ_GLOW_FLOOR + (1 - PROJ_GLOW_FLOOR) * pulse);
+            const g = ctx.createRadialGradient(offX, offY, 0, offX, offY, Math.max(grx, gry));
+            g.addColorStop(0, hexA(spr.glow, ga));
+            g.addColorStop(0.55, hexA(spr.glow, ga * 0.4));
+            g.addColorStop(1, hexA(spr.glow, 0));
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            /* 椭圆贴着图的形状：箭是长条、弹是圆球，用圆会把长箭裹成一大团 */
+            ctx.ellipse(offX, offY, grx, gry, 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          /* ② 图本身；寿命末端整体淡出（那是"快消失了"，不是呼吸） */
+          ctx.globalAlpha = fade * artA;
+          ctx.drawImage(st.img, offX - len / 2, offY - hgt / 2, len, hgt);
           ctx.restore();
           continue;
         }
@@ -979,7 +1626,12 @@ export class Renderer {
   _bow(ctx, u, x, y, r, castP, aimAngle, castKind) {
     const bow = u.bow;
     if (!bow) return;
-    const src = bowStateSrc(bow, castP);
+    /* 先按 castKind 挑出这一式的那套美术（荣 / 枯），
+       后面所有几何量（bowH / anchor / nock / burst）都从这套里读 ——
+       两式的画布不同，锚点也不同，混用会让弓飞到球外面去。 */
+    const art = pickBowArt(bow, castKind);
+    if (!art) return;
+    const src = bowStateSrc(art, castP);
     if (!src) return;
     const st = getSticker(src);
     if (!st || !st.ready || st.failed) return;   // 没加载好就干脆不画，别画个方块
@@ -988,15 +1640,15 @@ export class Renderer {
     const ih = st.img.naturalHeight || st.img.height;
     /* 单位注意：_units 里的 x / y / r 全是**世界单位**（快照已经除过 SCALE），
        画布的整体缩放由外层 transform 负责，所以这里不能乘 SCALE。 */
-    const drawH = bow.bowH;
+    const drawH = art.bowH;
     const drawW = drawH * (iw / ih);             // 宽度按原图比例，绝不拉伸
-    const axF = bow.anchor.x, ayF = bow.anchor.y;
+    const axF = art.anchor.x, ayF = art.anchor.y;
 
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(((aimAngle ?? 0) * Math.PI) / 180);   // 0° = 朝 +X
     /* 把图片的**锚点**摆到球心：锚点在这块画布上的位置就是球心的位置。
-       两张弓帧（平时 / 拉弓）已由 make-bow-sprites.mjs 对齐到同一块画布，
+       两张弓帧（平时 / 拉弓）已由 make-sprites.mjs 对齐到同一块画布，
        所以这里换图不会让弓横跳 —— 原始两张图的画布宽度差 40px。 */
     ctx.drawImage(st.img, -axF * drawW, -ayF * drawH, drawW, drawH);
 
@@ -1004,26 +1656,18 @@ export class Renderer {
        这些箭是**武器的一部分**（不是已经射出去的弹道），
        所以写在弓的局部坐标系里 —— 跟着弓一起转，也就不受陀螺自转影响。
        画在弓图之上、球之下：球仍然盖住握把内侧。 */
-    if (castKind === 1 && castP > 0 && castP < 0.999 && bow.burst && bow.arrow) {
-      const at = getSticker(bow.arrow);
+    if (castKind === 1 && castP > 0 && castP < 0.999 && art.burst && art.arrow) {
+      const at = getSticker(art.arrow);
       if (at && at.ready && !at.failed) {
         const aw = at.img.naturalWidth || at.img.width;
         const ah = at.img.naturalHeight || at.img.height;
-        const aLen = (bow.arrowLenFrac ?? 0.335) * drawH;
+        const aLen = (art.arrowLenFrac ?? 0.335) * drawH;
         const aH = aLen * (ah / aw);
         /* 搭箭节点在画布上的位置 → 相对球心的局部坐标 */
-        const nlx = (bow.nock.x - axF) * drawW;
-        const nly = (bow.nock.y - ayF) * drawH;
-        const n = bow.burst.count;
-        const spread = (bow.burst.spreadDeg * Math.PI) / 180;
-        for (let k = 0; k < n; k++) {
-          /* 与 skills.js 里五连发**同一个公式**：
-             把 k 在 (0..n-1) 上映射到 [-1,1]，再乘张角的一半。
-             这样画出来的扇形与箭真正飞出去的方向逐根对齐。 */
-          const off = (n === 1) ? 0 : ((k / (n - 1)) * 2 - 1) * spread;
-          /* 正中那一根（off = 0）已经画在 draw 图里了，这里跳过，
-             否则会和图上那支箭叠成两支。 */
-          if (Math.abs(off) < 1e-9) continue;
+        const nlx = (art.nock.x - axF) * drawW;
+        const nly = (art.nock.y - ayF) * drawH;
+        for (const offDeg of burstOffsetsDeg(art.burst)) {
+          const off = (offDeg * Math.PI) / 180;
           ctx.save();
           ctx.translate(nlx, nly);
           ctx.rotate(off);
@@ -1061,6 +1705,15 @@ export class Renderer {
       const r = u.r / SCALE;
       const tc = teamColor(u.team);
 
+      /* ---------- 见晴的每帧状态（全部来自快照）----------
+         ringKind / auxKind = 两面水镜当前的颜色（①③ 各一套循环）；
+         flying = 起飞中 → 虚化 + 变大 + 影子。 */
+      const ringDef = d[o + 16] || 0;
+      const ringBorrow = d[o + 17] || 0;
+      const flying = (d[o + 18] || 0) > 0.5;
+      const vis = flying ? FLY_SCALE : 1;
+      const rv = r * vis;
+
       ctx.save();
 
       /* 时间停止（公主传承1）：除豁免者外全场褪色。
@@ -1076,13 +1729,23 @@ export class Renderer {
          不该压在血条、闪光、隐身轮廓上面。 */
       this._bow(ctx, u, x, y, r, castP, aimAngle, castKind);
 
-      /* 开华的极光形态：脚下一圈缓慢旋转的光晕，说明"这个球已经强化过了" */
+      /* 开华的极光形态：脚下一圈缓慢旋转的光晕 + 一层柔光底，
+         说明"这个球已经强化过了"。作者要求"稍微显眼一点"，
+         所以把弧的不透明度提了一档，并加了一层径向柔光底
+         （原来只有三条很淡的弧，混战时基本看不出来）。 */
       if (bloomed) {
         const t = (snap.f / 60) * 0.7;
+        const g = ctx.createRadialGradient(x, y, r * 0.6, x, y, r + 14);
+        g.addColorStop(0, `rgba(167,139,250,${BLOOM_GLOW_ALPHA.toFixed(3)})`);
+        g.addColorStop(0.55, `rgba(125,211,252,${(BLOOM_GLOW_ALPHA * 0.45).toFixed(3)})`);
+        g.addColorStop(1, 'rgba(167,139,250,0)');
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x, y, r + 14, 0, Math.PI * 2); ctx.fill();
         for (let k = 0; k < 3; k++) {
-          ctx.globalAlpha = 0.18 - k * 0.045;
+          ctx.globalAlpha = BLOOM_ARC_ALPHA - k * 0.08;
           ctx.strokeStyle = ['#a78bfa', '#7dd3fc', '#f0abfc'][k];
-          ctx.lineWidth = 2.5;
+          ctx.lineWidth = 3.2 - k * 0.5;
           ctx.beginPath();
           ctx.arc(x, y, r + 5 + k * 3.5, t + k * 2.1, t + k * 2.1 + Math.PI * 1.25);
           ctx.stroke();
@@ -1093,6 +1756,22 @@ export class Renderer {
       /* 隐身（折光）：整颗球半透明，并加一圈虚线轮廓，避免"球消失了"的错觉 */
       if (stealth) {
         ctx.globalAlpha = 0.30;
+      } else if (flying) {
+        /* 起飞："虚化" —— 比隐身浅，但要能看出"她不在这一层" */
+        ctx.globalAlpha = FLY_ALPHA;
+      }
+
+      /* ---------- 飞行中的影子（近大远小）----------
+         画在球的正下方：飞得"高"（视觉放大）时影子更小更淡，
+         这样不用真的做 3D 也能读出"她飞起来了"。 */
+      if (flying) {
+        ctx.save();
+        ctx.globalAlpha = FLY_SHADOW_ALPHA;
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.ellipse(x, y + rv * 0.95, rv * 0.78, rv * 0.30, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       }
 
       /* -------- 蓄力 / 冲刺的地面光环 --------
@@ -1146,7 +1825,8 @@ export class Renderer {
       /* 蓄力时球体自身也收一下再胀一下（周期用蓄力进度驱动，
          不依赖墙钟时间，所以暂停/回放时脉动是"冻结"的）。 */
       const pulse = mode > 0.5 && mode < 1.5 ? 1 + Math.sin(chargeP * Math.PI * 6) * 0.05 : 1;
-      const rr = r * pulse;
+      /* 起飞时整体放大的是**显示**（rv），判定箱不变 —— 作者要的是"表现为变大" */
+      const rr = r * pulse * vis;
 
       /* 运动拖尾已移除：
          原先用固定透明度的粗线表示速度，形状接近实心矩形，
@@ -1156,6 +1836,11 @@ export class Renderer {
          没有贴图或尚未加载完成时回退成纯色圆。
          开华后换用第二张贴图 —— 用快照里的 bloomed 标记判断，
          而不是读单位的实时状态，这样暂停/回放才对得上。 */
+      /* ⚠ "虚化"必须在**画球体之前**再设一次：
+         上面那几段装饰（队伍环、水镜圈、护盾、长剑）各自会把 globalAlpha
+         改回 1 —— 只在块首设一次的话，"没装水镜的见晴起飞时看起来完全不透明"
+         （实测就是被这条抓住的：球体那次绘制的 alpha 是 1 而不是 0.55）。 */
+      if (flying) ctx.globalAlpha = FLY_ALPHA;
       const sp = (bloomed && u.stickerBloom) ? u.stickerBloom : u.sticker;
       const st = sp ? getSticker(sp.src) : null;
       const useSticker = !!(st && st.ready && !st.failed);
@@ -1174,8 +1859,8 @@ export class Renderer {
         ctx.beginPath();
         ctx.arc(x, y, rr, 0, Math.PI * 2);
         ctx.clip();
-        const iw = st.img.naturalWidth || st.img.width;
         const ih = st.img.naturalHeight || st.img.height;
+        const iw = st.img.naturalWidth || st.img.width;
         const srcW = iw * (sp.r * 2), srcH = ih * (sp.r * 2);
         const srcX = iw * sp.cx - srcW / 2, srcY = ih * sp.cy - srcH / 2;
         ctx.drawImage(st.img, srcX, srcY, srcW, srcH, x - rr, y - rr, rr * 2, rr * 2);
@@ -1190,7 +1875,7 @@ export class Renderer {
          贴图分支里的裁剪路径已被 restore 丢弃，
          直接 stroke 会去描"上一个路径"（拖尾或别的球）。 */
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.arc(x, y, rr, 0, Math.PI * 2);
       // 受击闪光
       if (flash > 0) {
         ctx.strokeStyle = '#fff';
@@ -1204,11 +1889,94 @@ export class Renderer {
       // 队伍色细环
       ctx.globalAlpha = stealth ? 0.2 : 0.45;
       ctx.beginPath();
-      ctx.arc(x, y, r + 2.6, 0, Math.PI * 2);
+      ctx.arc(x, y, rv + 2.6, 0, Math.PI * 2);
       ctx.strokeStyle = tc.main;
       ctx.lineWidth = 1.2;
       ctx.stroke();
       ctx.globalAlpha = 1;
+
+      /* ---------- 见晴 · 水镜外圈 ----------
+         小球边缘那一圈就是她的形态指示：淡绿 / 淡粉（①）、深蓝紫 / 白（③）。
+         ①③ 可以同时装，所以两圈分开画：防守色画外圈，借用色画内侧那圈。
+         （作者的原话就是"小球边缘一圈的颜色发生变化"。） */
+      if (ringDef || ringBorrow) {
+        if (ringDef) {
+          ctx.globalAlpha = 0.95;
+          ctx.strokeStyle = MIRROR_COLORS[ringDef] || '#ffffff';
+          ctx.lineWidth = MIRROR_RING_W;
+          ctx.beginPath();
+          ctx.arc(x, y, rv + MIRROR_RING_GAP, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        if (ringBorrow) {
+          ctx.globalAlpha = 0.9;
+          ctx.strokeStyle = MIRROR_COLORS[ringBorrow] || '#ffffff';
+          ctx.lineWidth = MIRROR_RING_W * 0.6;
+          ctx.beginPath();
+          ctx.arc(x, y, rv + MIRROR_RING_GAP * 0.35, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = flying ? FLY_ALPHA : 1;
+      }
+
+      /* ---------- 见晴 · 水镜护盾 ----------
+         护盾值走资源条（血条下方那条「水镜护盾」），这里再补一圈柔光，
+         不然"有没有盾"只能靠读条。 */
+      if (u.resDef && u.resDef.id === 'mirror' && res > 0) {
+        const k = Math.max(0, Math.min(1, res / Math.max(1, u.resMax)));
+        const g = ctx.createRadialGradient(x, y, rv * 0.7, x, y, rv + 9);
+        g.addColorStop(0, `rgba(240,171,252,${(SHIELD_ALPHA * k).toFixed(3)})`);
+        g.addColorStop(1, 'rgba(240,171,252,0)');
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, rv + 9, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      /* ---------- 见晴 · 猩红长剑 ----------
+         平时：绑在球缘、朝**移动方向**（face）。
+         挥动中：**以球心为轴旋转**扫过 sweepDeg（作者要的"长剑有以小球原点
+         为轴的旋转动画"）—— 用 swordSwing 事件的时间轴驱动，所以暂停会冻住、
+         回放会跟着倒回去。 */
+      if (u.swordLen > 0) {
+        const swing = this._swordSwingAt(battle, i, snap.f);
+        const len = swing ? swing.len : u.swordLen;
+        let fa;
+        if (swing) {
+          /* ease-out：出手快、收尾慢，看起来像"挥"而不是"转" */
+          const k = 1 - Math.pow(1 - swing.t, 2.2);
+          fa = swing.angle - swing.sweep / 2 + swing.sweep * k;
+        } else {
+          fa = ((d[o + 6] ?? 0) * Math.PI) / 180;      // face（角度制）
+        }
+        const x0 = x + Math.cos(fa) * rv;
+        const y0 = y + Math.sin(fa) * rv;
+        const x1 = x + Math.cos(fa) * (rv + len * vis);
+        const y1 = y + Math.sin(fa) * (rv + len * vis);
+        ctx.globalAlpha = flying ? 0.75 : 1;
+        /* 挥动中把剑画得亮一点、粗一点，让"这一下真的在动"看得出来 */
+        ctx.strokeStyle = swing ? '#a52a2a' : SWORD_COLOR;
+        ctx.lineWidth = SWORD_W * (swing ? 1.25 : 1);
+        ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        /* 剑刃中间一道更亮的高光，让它看起来是"剑"而不是一根棍 */
+        ctx.strokeStyle = swing ? 'rgba(254,202,202,0.95)' : 'rgba(248,113,113,0.85)';
+        ctx.lineWidth = SWORD_W * 0.35;
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        /* 挥动时再补一道淡淡的残影弧（剑扫过的轨迹） */
+        if (swing) {
+          ctx.globalAlpha = (flying ? 0.5 : 0.7) * (1 - swing.t);
+          ctx.strokeStyle = swing.kind === 'guard' ? '#fecaca' : '#fca5a5';
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(x, y, rv + len * vis * 0.92,
+            swing.angle - swing.sweep / 2, fa);
+          ctx.stroke();
+        }
+        ctx.lineCap = 'butt';
+        ctx.globalAlpha = flying ? FLY_ALPHA : 1;
+      }
 
       /* 隐身时画一圈虚线：半透明的球很容易被当成"已经不在了"，
          虚线轮廓能说明"它还在，只是隐身中"。 */

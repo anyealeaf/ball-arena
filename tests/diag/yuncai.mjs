@@ -3,6 +3,7 @@
  * 每个技能单独装、单独测；能定量的全部定量（距离、帧数、伤害数字）。
  * 用法：node tests/diag/yuncai.mjs
  */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle, SNAP_STRIDE } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, SPECIES_BY_ID, makeUnitStats, SCALE } from '../../js/balls.js';
@@ -80,7 +81,8 @@ console.log('【0】基础数值');
   check('未装辉光领域时没有极光', b.aurora === false);
   const b2 = mk(['yuncai_zheguang', 'yuncai_domain']);
   check('装了折光后 melee = 100', b2.units[0].melee === 100, String(b2.units[0].melee));
-  check('装了辉光领域后 dodge = 10%', Math.abs(b2.units[0].dodge - 0.10) < 1e-9, String(b2.units[0].dodge));
+  check(`装了辉光领域后 dodge = 配置值（${YUNCAI.domain.dodge}）`,
+    Math.abs(b2.units[0].dodge - YUNCAI.domain.dodge) < 1e-9, String(b2.units[0].dodge));
   check('装了辉光领域后开启极光', b2.aurora === true);
 }
 
@@ -591,12 +593,25 @@ console.log('\n【④】开华');
   check(`开华后魔弹伤害 ${YUNCAI.modan.dmg} → ${YUNCAI.modan.dmg + P.lightBonus}`,
     shot && shot.value === YUNCAI.modan.dmg + P.lightBonus, shot ? String(shot.value) : '-');
 
-  /* 开华 + 辉光领域 → 闪避 15% */
+  /* 开华 + 辉光领域 → 闪避按配置提升。
+     **断言只钉"机制"，不钉"具体数字"** —— 闪避率是平衡数值，
+     作者随时会在素材编辑器里调（2026-10 就调过：10%/15% → 15%/24%）。
+     把 0.10 写死在断言里，作者一改就"红"给你看，而代码其实是对的
+     （README 第 38 条：改了数值之后，旧规则的断言会变成假失败）。
+     所以这里对照**配置里的那份真值**，另外守住"它是个合理的概率、且开华后更高"。 */
+  const DOM = YUNCAI.domain;
   const b4 = mk(['yuncai_domain', 'yuncai_kaihua']);
   const A4 = b4.units[0];
-  check('开华前闪避 10%', Math.abs(A4.dodge - 0.10) < 1e-9, String(A4.dodge));
+  check(`开华前闪避 = 配置值（${DOM.dodge}）`,
+    Math.abs(A4.dodge - DOM.dodge) < 1e-9, String(A4.dodge));
   A4.hp = 400; b4.step();
-  check('开华后闪避提升到 15%', Math.abs(A4.dodge - 0.15) < 1e-9, String(A4.dodge));
+  check(`开华后闪避 = 配置值（${DOM.dodgeBloomed}）`,
+    Math.abs(A4.dodge - DOM.dodgeBloomed) < 1e-9, String(A4.dodge));
+  check('两个闪避率都是合理概率（0 < 值 < 0.9）',
+    DOM.dodge > 0 && DOM.dodge < 0.9 && DOM.dodgeBloomed > 0 && DOM.dodgeBloomed < 0.9,
+    `${DOM.dodge} / ${DOM.dodgeBloomed}`);
+  check('开华后的闪避更高（这一条是设计，不是数值）',
+    DOM.dodgeBloomed > DOM.dodge, `${DOM.dodge} → ${DOM.dodgeBloomed}`);
 }
 
 /* ============ ⑤ 棱镜 ============ */
@@ -690,7 +705,9 @@ console.log('\n【⑥】辉光领域');
 {
   const b = mk(['yuncai_domain']);
   check('开启全场极光', b.aurora === true);
-  check('晕彩获得 10% 闪避', Math.abs(b.units[0].dodge - 0.10) < 1e-9);
+  /* 同上：对照配置里的真值，而不是把 10% 写死 */
+  check(`晕彩获得配置里的闪避（${YUNCAI.domain.dodge}）`,
+    Math.abs(b.units[0].dodge - YUNCAI.domain.dodge) < 1e-9, String(b.units[0].dodge));
   check('领域事件已发出', evCount(b, 'domainOn') === 1);
 
   /* 闪避要真的生效：打很多次，数闪避事件 */
@@ -704,8 +721,11 @@ console.log('\n【⑥】辉光领域');
     total++;
   }
   const rate = dodged / total;
-  check('10% 闪避的实际触发率接近 10%',
-    Math.abs(rate - 0.10) < 0.06, `${(rate * 100).toFixed(1)}%（${dodged}/${total}）`);
+  /* 触发率当然要按**配置里的**目标值比（作者可能把它调到 15%），
+     容差 ±6 个百分点：400 次采样，15% 的 3σ 约 ±5.4%。 */
+  const want = YUNCAI.domain.dodge;
+  check(`闪避的实际触发率接近配置值（${(want * 100).toFixed(0)}%）`,
+    Math.abs(rate - want) < 0.06, `${(rate * 100).toFixed(1)}%（${dodged}/${total}）`);
 
   /* 闪避是可复现的：同一颗种子结果必须一致 */
   const run = () => {

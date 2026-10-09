@@ -31,6 +31,7 @@ import fs from 'node:fs/promises';
    从 balls.js 现取就永远不会漏，也不需要谁记得。 */
 const CHECKS = [
   ['index.html', 'text/html', 'HTML 入口'],
+  ['launcher.html', 'text/html', '本地启动器页面'],
   ['js/main.js', 'javascript', '入口脚本'],
   ['js/core.js', 'javascript', '战斗引擎'],
   ['js/skills.js', 'javascript', '技能表'],
@@ -59,11 +60,32 @@ function collect(sp, node, path) {
 try {
   const { SPECIES } = await import('../js/balls.js');
   for (const sp of SPECIES) collect(sp, sp, '');
+  /* 技能参数里的美术（弹道贴图 arrowSprite / sprite、领域的 domain.src…）也要算进来。
+     这些路径写在**技能参数表**里，而球种配置里没有它们 —— 只扫 balls.js 的话，
+     这轮新加的蝙蝠 / 两枚能量弹就会漏掉。
+     做法是把 skills.js 的**整个命名空间**扫一遍，不点名 YUNCAI / TINA / TAOYAO：
+     以后新角色的参数表只要导出，这里自动覆盖，不用谁记得回来加一行。 */
+  const skills = await import('../js/skills.js');
+  for (const [k, v] of Object.entries(skills)) {
+    if (v && typeof v === 'object') collect({ name: `技能表·${k}` }, v, k);
+  }
 } catch (e) {
   console.error(`✘ 读不到球种表，无法自动列出贴图：${e.message}`);
   process.exit(1);
 }
 for (const [src, label] of characterAssets) CHECKS.push([src, 'image/', label]);
+
+/* --list：离线把"要抽查的清单"打出来就退出。
+   加这个是因为清单是**推导出来的**，而推导代码本身也会错
+   （上面就修过"只扫 balls.js 漏掉技能表里的美术"）。
+   有了它，改完推导逻辑不用等发布、不用联网就能先看一眼清单对不对。 */
+if (process.argv.includes('--list')) {
+  console.log(`离线清单（共 ${CHECKS.length} 项，未联网）：`);
+  for (const [path, type, label] of CHECKS) {
+    console.log(`  ${path.padEnd(46)} ${String(type || 'text').padEnd(11)} ${label}`);
+  }
+  process.exit(0);
+}
 
 console.log(`验证站点: ${BASE}\n`);
 let bad = 0;

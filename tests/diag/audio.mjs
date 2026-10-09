@@ -12,6 +12,7 @@
  *
  * 用法：node tests/diag/audio.mjs
  */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, SPECIES_BY_ID, makeUnitStats } from '../../js/balls.js';
@@ -28,15 +29,20 @@ function makeFakeCtx() {
   const rec = {
     osc: [], noise: 0, pans: [], gains: [],
     sources: 0, maxConcurrent: 0, live: 0,
+    filters: [], comps: [],
   };
   const param = (v = 0) => ({
     value: v,
     /* 这是个"记录器"不是忠实的参数模型：真实 Web Audio 里
        setValueAtTime 只是排程、不会立刻改 .value，
-       但测试要的正是"排了什么值"，所以这里把它记进 .value。 */
-    setValueAtTime(x) { this.value = x; return this; },
-    linearRampToValueAtTime(x) { this.value = x; return this; },
-    exponentialRampToValueAtTime(x) { this.value = x; return this; },
+       但测试要的正是"排了什么值"，所以这里把它记进 .value。
+       hist 保留每一次排程 —— 音量要看**峰值**：我们每个音都是
+       "起振 → 峰值 → 衰减到 0.0001"，只看最后的 .value 会全是 0.0001，
+       那就永远比不出"谁更响"（踩过）。 */
+    hist: [],
+    setValueAtTime(x) { this.value = x; this.hist.push(x); return this; },
+    linearRampToValueAtTime(x) { this.value = x; this.hist.push(x); return this; },
+    exponentialRampToValueAtTime(x) { this.value = x; this.hist.push(x); return this; },
     cancelScheduledValues() { return this; },
   });
   const trackSrc = () => {
@@ -85,7 +91,20 @@ function makeFakeCtx() {
       return { buffer: null, connect() {}, start() {}, stop() { done(); } };
     },
     createBiquadFilter() {
-      return { type: 'lowpass', frequency: param(1000), connect() {} };
+      /* 记下这一级滤波器的类型与截止频率：打击音的"脆"是靠高通做出来的，
+         而"沉"是低频音 —— 只数声源个数看不出这两件事有没有真的发生。 */
+      const f = { type: 'lowpass', frequency: param(1000), connect() {} };
+      rec.filters.push(f);
+      return f;
+    },
+    createDynamicsCompressor() {
+      /* 总线软限幅：混战时不让十几下打击叠成爆音（真实浏览器里有这一级） */
+      const c = {
+        threshold: param(-24), knee: param(30), ratio: param(12),
+        attack: param(0.003), release: param(0.25), connect() {},
+      };
+      rec.comps.push(c);
+      return c;
     },
     createStereoPanner() {
       const p = { pan: param(0), connect() {} };
@@ -121,7 +140,8 @@ console.log('【1】环境不支持时降级');
 /* ---------- 之后都用伪 AudioContext ---------- */
 const { ctx: fakeCtx, rec } = makeFakeCtx();
 globalThis.AudioContext = function () { return fakeCtx; };
-const { AudioEngine, MAX_VOICES, MAX_STEP_FRAMES } = await import('../../js/audio.js');
+const { AudioEngine, MAX_VOICES, MAX_STEP_FRAMES, hitWeight, HIT_SOFT, HIT_HARD } =
+  await import('../../js/audio.js');
 
 function mk(skills, opts = {}) {
   const stats = (id, sk) => ({ ...makeUnitStats(id), skills: sk });
@@ -339,6 +359,101 @@ console.log('\n【8】关键瞬间的音色区分');
   try { a.play({ type: 'domainOn' }, null); a.play({ type: 'fieldEnd' }, null); }
   catch (e) { threw = e; }
   check('没配音的事件静默处理（不抛错）', !threw, threw ? threw.message : '无异常');
+}
+
+/* ---------- 9) 打击感：伤害越高，反馈越强 ----------
+   作者的要求是「增强小球攻击命中时候的打击感（伤害越高反馈越强）」。
+   "打击感"在这份实现里是三层声音的合成（脆 / 实 / 沉），
+   所以这里不只验"有声音"，而是逐层核对：
+     · 权重曲线单调、两端有定义（不然轻碰和重击听不出差别）；
+     · 层数随伤害增加（轻碰只有脆 + 实，重击才加低频那一层）；
+     · 音高、音量、余音三者都随伤害走（只放大音量听起来像"离麦克风更近"）。 */
+console.log('\n【9】打击感（伤害越高反馈越强）');
+{
+  check('0 伤害的权重是 0', hitWeight(0) === 0, String(hitWeight(0)));
+  check(`伤害 ≥ ${HIT_HARD} 时权重拉满到 1`,
+    hitWeight(HIT_HARD) === 1 && hitWeight(9999) === 1,
+    `${HIT_HARD} → ${hitWeight(HIT_HARD)}`);
+  check(`伤害 ≤ ${HIT_SOFT} 时权重仍然很低（轻碰就是轻碰）`,
+    hitWeight(HIT_SOFT) < 0.3, `${HIT_SOFT} → ${hitWeight(HIT_SOFT).toFixed(3)}`);
+  const seq = [0, 10, 20, 50, 66, 100, 200, 300, 800].map(hitWeight);
+  check('权重随伤害单调不减',
+    seq.every((v, i) => i === 0 || v >= seq[i - 1] - 1e-9),
+    seq.map(v => v.toFixed(2)).join(' ≤ '));
+  check('中间几档确实拉开了档次（不是一刀切）',
+    hitWeight(66) > 0.3 && hitWeight(200) - hitWeight(66) > 0.2 && hitWeight(200) < 1,
+    `66→${hitWeight(66).toFixed(2)}　200→${hitWeight(200).toFixed(2)}`);
+
+  const a = new AudioEngine();
+  a.unlock(); a.setEnabled(true);
+  check('总线接上了软限幅（混战不削顶爆音）',
+    !!a.comp && a.comp.threshold.value === -12,
+    a.comp ? `threshold ${a.comp.threshold.value}dB、ratio ${a.comp.ratio.value}` : '没有限幅节点');
+
+  /** 播一条事件，把"这一下"的声源、频率、音量峰值、余音长度全部录下来 */
+  const impact = (ev) => {
+    fakeCtx.currentTime += 0.5;       // 让上一声自然播完，别撞上发声名额上限
+    rec.osc.length = 0; rec.noise = 0; rec.filters.length = 0; rec.gains.length = 0;
+    a._last = Object.create(null);
+    a._active.length = 0;
+    const t0 = fakeCtx.currentTime;
+    a.play(ev, null);
+    return {
+      tones: rec.osc.map(o => ({ f0: o.freqSeq[0], f1: o.freqSeq[o.freqSeq.length - 1] })),
+      noises: rec.noise,
+      filters: rec.filters.map(f => ({ type: f.type, hz: f.frequency.value })),
+      durs: a._active.map(end => end - t0),
+      gains: rec.gains.map(g => Math.max(...(g.hist.length ? g.hist : [0]))),
+    };
+  };
+  const loudest = (r) => Math.max(...r.gains, 0);
+  const longest = (r) => Math.max(...r.durs, 0);
+
+  const light = impact({ type: 'hit', kind: 'melee', value: 5 });
+  const mid = impact({ type: 'hit', kind: 'melee', value: 66 });
+  const heavy = impact({ type: 'hit', kind: 'melee', value: 300 });
+
+  check('轻碰只有两层（脆 + 实），不出低频那一层',
+    light.tones.length === 1 && light.noises === 1,
+    `${light.tones.length} 个音 + ${light.noises} 个噪声`);
+  check('中等伤害开始有"沉"的低频层', mid.tones.length === 2, `${mid.tones.length} 个音`);
+  check('重击三层全上（脆 + 实 + 沉）',
+    heavy.tones.length === 2 && heavy.noises === 1,
+    `${heavy.tones.length} 个音 + ${heavy.noises} 个噪声`);
+  check('伤害越高音高越低',
+    heavy.tones[0].f0 < mid.tones[0].f0 && mid.tones[0].f0 < light.tones[0].f0,
+    `${light.tones[0].f0.toFixed(0)} → ${mid.tones[0].f0.toFixed(0)} → ${heavy.tones[0].f0.toFixed(0)} Hz`);
+  check('伤害越高音量越大',
+    loudest(heavy) > loudest(mid) && loudest(mid) > loudest(light),
+    `${loudest(light).toFixed(3)} → ${loudest(mid).toFixed(3)} → ${loudest(heavy).toFixed(3)}`);
+  check('伤害越高余音越长',
+    longest(heavy) > longest(mid) && longest(mid) > longest(light),
+    `${(longest(light) * 1000).toFixed(0)} → ${(longest(mid) * 1000).toFixed(0)} → ${(longest(heavy) * 1000).toFixed(0)} ms`);
+  check('"脆"的那一下真的做了高通（低通 + 高通 = 带通）',
+    heavy.filters.some(f => f.type === 'highpass' && f.hz >= 400),
+    heavy.filters.map(f => `${f.type}@${f.hz}`).join(', '));
+  check('低频层落在 110Hz 以下（是"沉"，不是"闷"）',
+    heavy.tones.some(t => t.f0 <= 110),
+    heavy.tones.map(t => t.f0.toFixed(0)).join(' / ') + ' Hz');
+  check('本体音高不会滑进低频层那一带（两层不打架）',
+    heavy.tones[0].f0 > 110 && heavy.tones[0].f1 > 40,
+    `本体 ${heavy.tones[0].f0.toFixed(0)} → ${heavy.tones[0].f1.toFixed(0)} Hz`);
+
+  /* 弹道命中也要跟着伤害走（它是另一条事件，容易只顾了近战那一条） */
+  const shotLight = impact({ type: 'projHit', value: 10 });
+  const shotHeavy = impact({ type: 'projHit', value: 300 });
+  check('弹道命中同样"伤害越高越重"',
+    shotHeavy.tones[0].f0 < shotLight.tones[0].f0 && loudest(shotHeavy) > loudest(shotLight),
+    `${shotLight.tones[0].f0.toFixed(0)}Hz/${loudest(shotLight).toFixed(3)} → ${shotHeavy.tones[0].f0.toFixed(0)}Hz/${loudest(shotHeavy).toFixed(3)}`);
+  check('弹道命中比近战更脆（音高更高）',
+    shotHeavy.tones[0].f0 > heavy.tones[0].f0,
+    `近战 ${heavy.tones[0].f0.toFixed(0)}Hz vs 弹道 ${shotHeavy.tones[0].f0.toFixed(0)}Hz`);
+
+  /* 每帧持续伤害（tick）不能变成"每下都重击"：它走的是单独的分支 */
+  const tick = impact({ type: 'hit', tick: true, value: 300 });
+  check('每帧持续伤害不走打击音那一套（伤害再高也只有一个轻音）',
+    tick.tones.length === 1 && tick.noises === 0 && loudest(tick) < 0.1,
+    `${tick.tones.length} 个音、峰值 ${loudest(tick).toFixed(3)}`);
 }
 
 console.log('\n' + log.join('\n'));

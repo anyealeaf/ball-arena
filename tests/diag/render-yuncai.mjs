@@ -9,6 +9,7 @@
  *
  * 用法：node tests/diag/render-yuncai.mjs
  */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle, SNAP_STRIDE, PROJ_STRIDE, FIELD_STRIDE } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, SPECIES_BY_ID, makeUnitStats, SCALE } from '../../js/balls.js';
@@ -42,6 +43,9 @@ function makeCtx() {
      给一个按字数估宽的桩件即可（真实宽度不影响被测逻辑）。 */
   ctx.measureText = (t) => ({ width: String(t).length * 5 });
   ctx.arc = (x, y, r, a0, a1) => calls.push({ n: 'arc', a: [x, y, r, a0, a1], alpha: ctx.globalAlpha, lw: ctx.lineWidth });
+  /* 贴图弹道外面那圈光晕是椭圆（贴着图的形状），桩件必须有 */
+  ctx.ellipse = (x, y, rx, ry, rot, a0, a1) =>
+    calls.push({ n: 'ellipse', a: [x, y, rx, ry, rot, a0, a1], alpha: ctx.globalAlpha, lw: ctx.lineWidth });
   ctx.createRadialGradient = (...a) => {
     calls.push({ n: 'radialGrad', a, alpha: ctx.globalAlpha, lw: ctx.lineWidth });
     return { addColorStop: () => {} };
@@ -336,6 +340,124 @@ console.log('\n【④】开华形态贴图');
   check('开华前画的是常态贴图', before === Y.sticker.src, String(before));
   check('开华后自动换成开华形态贴图', after === Y.stickerBloom.src, String(after));
   check('两张贴图确实不同', before !== after);
+}
+
+/* ============ ④b 开华的特效与屏幕抖动 ============ */
+console.log('\n【④b】开华爆发 + 屏幕抖动');
+{
+  const b = mk(['yuncai_kaihua'], { rules: { timeLimit: 5 } });
+  const A = b.units[0];
+  const ctx = makeCtx();
+  const rd = new Renderer(makeCanvas(ctx));
+  b.step();
+  A.hp = 400;
+  b.step();                                   // 这一步触发开华
+  /* 触发之后让对局**继续跑完** —— 否则快照只到第 2 帧，
+     后面那些"第 26 / 40 帧"的渲染会被 draw() 夹到最后一张快照上
+     （第一次就是这么错的：在第 25 帧量到 amp=0.90，其实是第 1 帧的值）。 */
+  b.runToEnd();
+  const ev = b.events.find(e => e.type === 'bloom');
+  check('跑出了开华事件（否则下面都测不到东西）', !!ev, ev ? `第 ${ev.f} 帧` : '没有');
+
+  if (ev) {
+    /* ⚠ 每次都要**拷一份**调用列表：ctx.calls 是同一个数组，
+       下一次 at() 会把它清空重填 —— 直接存引用的话，前面拿到的
+       "第 1 帧的调用"到最后会变成"最后一次渲染的调用"（踩过：
+       粗弧层数比出 0 → 0）。 */
+    const at = (frame) => {
+      ctx.calls.length = 0;
+      rd.draw(b, frame);
+      return { calls: ctx.calls.slice(), shakeX: rd.shakeX, shakeY: rd.shakeY, amp: rd.shakeAmp };
+    };
+    const c0 = at(ev.f + 1).calls;
+    const rings = c0.filter(c => c.n === 'arc');
+    check('爆发画了三层扩散光环', rings.length >= 3, `${rings.length} 个圆弧调用`);
+    const widest = Math.max(...rings.map(c => c.lw));
+    check('光环比原来更粗（≥6，原来 4）', widest >= 6, `最粗线宽 ${widest}`);
+    const solid = rings.filter(c => c.alpha >= 0.7);
+    check('光环更亮了（有不透明度 ≥0.7 的一层，原来最高 0.85×fade）',
+      solid.length >= 1, `不透明度 ${rings.map(c => c.alpha.toFixed(2)).join('/')}`);
+    check('爆发有中心闪光（径向渐变）',
+      c0.some(c => c.n === 'radialGrad'), 'radialGrad 存在');
+    /* 放射细线：8 根短线，靠 lineTo 数出来 */
+    const lines = c0.filter(c => c.n === 'lineTo').length;
+    check('爆发有一圈放射细线', lines >= 8, `${lines} 条 lineTo`);
+    /* 寿命比普通事件长：普通事件 22 帧就没了，开华要到 34 帧。
+       ⚠ 不能断言"第 40 帧一个圆弧都没有" —— 开华之后**常驻光晕**
+       每帧都在画弧，永远有。只能比"爆发那几层粗弧"退场了没有。 */
+    const cLate = at(ev.f + 26).calls;
+    const thickLate = cLate.filter(c => c.n === 'arc' && c.lw >= 4).length;
+    check('爆发比普通事件活得久（第 26 帧还在画爆发光环）', thickLate >= 2, `${thickLate} 层粗弧`);
+    const cEnd = at(ev.f + 40).calls;
+    const thickEarly = c0.filter(c => c.n === 'arc' && c.lw >= 4).length;
+    const thickEnd = cEnd.filter(c => c.n === 'arc' && c.lw >= 4).length;
+    check('爆发最终会退场（粗弧从多层减到 0）',
+      thickEarly >= 2 && thickEnd === 0, `第 1 帧 ${thickEarly} 层 → 第 40 帧 ${thickEnd} 层`);
+
+    /* ---- 常驻形态光晕：开华之后每帧都有柔光底 + 三条旋转弧 ---- */
+    const cAfter = at(ev.f + 60).calls;
+    /* 光晕底的径向渐变：**别用 alpha 判**（createRadialGradient 不吃 globalAlpha，
+       不透明度在色标里），只要求这一帧确实建了一个径向渐变。 */
+    check('开华后脚下有常驻柔光（径向渐变）',
+      cAfter.some(c => c.n === 'radialGrad'), '有 radialGrad');
+    /* 常驻弧：三条，线宽 3.2/2.7/2.2、不透明度 0.34/0.26/0.18（原来统一 0.18/0.135/0.09）。
+       所以判据是"最亮那条 ≥0.3 且至少三条 lw≥2"，而不是"每条都 ≥0.3"。 */
+    const arcsAfter = cAfter.filter(c => c.n === 'arc' && c.lw >= 2);
+    const maxArcA = arcsAfter.length ? Math.max(...arcsAfter.map(c => c.alpha)) : 0;
+    check('开华后常驻弧比以前更显眼（≥3 条、最亮一条 ≥0.30，原来最亮 0.18）',
+      arcsAfter.length >= 3 && maxArcA >= 0.3,
+      `${arcsAfter.length} 条，最亮 ${maxArcA.toFixed(2)}：` +
+      arcsAfter.map(c => `${c.lw}/${c.alpha.toFixed(2)}`).join(' '));
+
+    /* ---- 屏幕抖动 ---- */
+    const s0 = at(ev.f);
+    check('开华那一帧抖起来了', s0.amp > 0.9 && (Math.abs(s0.shakeX) + Math.abs(s0.shakeY)) > 0,
+      `amp=${s0.amp.toFixed(2)} (${s0.shakeX.toFixed(2)}, ${s0.shakeY.toFixed(2)})`);
+    check('抖动是"轻微"的（位移不超过 4 世界单位）',
+      Math.abs(s0.shakeX) <= 4 && Math.abs(s0.shakeY) <= 4,
+      `(${s0.shakeX.toFixed(2)}, ${s0.shakeY.toFixed(2)})`);
+    const s10 = at(ev.f + 10);
+    const sEnd = at(ev.f + 25);
+    check('抖动随时间衰减（第 10 帧弱于第 0 帧）',
+      s10.amp > 0 && s10.amp < s0.amp, `${s0.amp.toFixed(2)} → ${s10.amp.toFixed(2)}`);
+    check('抖动会归零（第 25 帧已经不抖了）',
+      sEnd.amp === 0 && sEnd.shakeX === 0 && sEnd.shakeY === 0, `amp=${sEnd.amp}`);
+
+    /* 抖动必须真的作用到画面上：相机 translate 里要带上它 */
+    const tr = s0.calls.filter(c => c.n === 'translate');
+    check('抖动真的作用到了相机（translate 里带上了偏移）',
+      tr.some(c => Math.abs(c.a[0] - (-rd.camX + s0.shakeX)) < 1e-9 &&
+                   Math.abs(c.a[1] - (-rd.camY + s0.shakeY)) < 1e-9),
+      `translate(${tr.map(c => c.a[0].toFixed(1) + ',' + c.a[1].toFixed(1)).join(' | ')})`);
+
+    /* 确定性：同一帧画两次必须一模一样（暂停/拖进度条不能变样） */
+    const a1 = at(ev.f + 5), a2 = at(ev.f + 5);
+    check('同一帧两次渲染的抖动完全一致（跟着帧号，不跟墙上时钟）',
+      a1.shakeX === a2.shakeX && a1.shakeY === a2.shakeY,
+      `${a1.shakeX.toFixed(6)} vs ${a2.shakeX.toFixed(6)}`);
+
+    /* 开关：关掉之后一点都不抖 */
+    rd.screenShake = false;
+    const off = at(ev.f);
+    check('关掉开关后完全不抖', off.amp === 0 && off.shakeX === 0 && off.shakeY === 0);
+    rd.screenShake = true;
+  }
+}
+
+/* ============ ④c 屏幕抖动只在开华时出现 ============ */
+console.log('\n【④c】没有开华就不该抖');
+{
+  /* 一局没有开华的晕彩（默认装配里就没有开华）：整局逐帧都不该抖 */
+  const b = mk(['yuncai_modan'], { rules: { timeLimit: 8 } });
+  const ctx = makeCtx();
+  const rd = new Renderer(makeCanvas(ctx));
+  let worst = 0;
+  for (let f = 0; f < b.snapshots.length; f++) {
+    ctx.calls.length = 0;
+    rd.draw(b, f);
+    worst = Math.max(worst, Math.abs(rd.shakeX) + Math.abs(rd.shakeY));
+  }
+  check('没装开华时整局都不抖（不会"每局都晃"）', worst === 0, `最大位移 ${worst}`);
 }
 
 /* ============ 血条上的详细血量 ============ */

@@ -9,12 +9,25 @@
  *
  * 用法：node tests/diag/bow.mjs
  */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle, SNAP_STRIDE, PROJ_STRIDE } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, SPECIES_BY_ID, makeUnitStats } from '../../js/balls.js';
-import { preloadStickers, Renderer } from '../../js/render.js';
+import { burstOffsetsDeg, pickBowArt, preloadStickers, Renderer } from '../../js/render.js';
 import { TAOYAO } from '../../js/skills.js';
 import { readFileSync, readdirSync } from 'node:fs';
+import sharp from 'sharp';
+/* 「弓朝哪边」的判据与构建脚本**共用一份**（tools/lib/bow-facing.mjs）——
+   两处各写一份启发式的话，结论会悄悄不一样，而"弓反了"很难看出来。 */
+import { bowFacing } from '../../tools/lib/bow-facing.mjs';
+
+/* 读一张 PNG 的原始 RGBA 像素（朝向判据要看每个像素，
+   与下面 FakeImage 只读文件头宽高是两回事）。 */
+async function rawOf(file) {
+  const { data, info } = await sharp(file).ensureAlpha().raw()
+    .toBuffer({ resolveWithObject: true });
+  return { data, w: info.width, h: info.height, ch: info.channels };
+}
 
 /* ---------- 无头环境的桩件（必须在 new Renderer() 之前装好）----------
    Renderer 构造时要读 window.devicePixelRatio，贴图加载要靠 Image。
@@ -113,6 +126,9 @@ function makeCtx() {
   }
   ctx.measureText = (t) => ({ width: String(t).length * 5 });
   ctx.arc = (x, y, r, a0, a1) => calls.push({ n: 'arc', a: [x, y, r, a0, a1], alpha: ctx.globalAlpha, lw: ctx.lineWidth });
+  /* 贴图弹道外面那圈光晕是椭圆（贴着图的形状）*/
+  ctx.ellipse = (x, y, rx, ry, rot, a0, a1) =>
+    calls.push({ n: 'ellipse', a: [x, y, rx, ry, rot, a0, a1], alpha: ctx.globalAlpha, lw: ctx.lineWidth });
   ctx.createRadialGradient = (...a) => {
     calls.push({ n: 'radialGrad', a, alpha: ctx.globalAlpha, lw: ctx.lineWidth });
     return { addColorStop: () => {} };
@@ -133,7 +149,8 @@ console.log('=========== 手持物件（弓）· 动作动画自检 ===========\
 /* ============ 1. 快照布局 ============ */
 console.log('【1】快照布局');
 {
-  check('SNAP_STRIDE 已扩到 16（castP / aimAngle / castKind）', SNAP_STRIDE === 16, String(SNAP_STRIDE));
+  check('SNAP_STRIDE 已扩到 19（castP / aimAngle / castKind / 水镜两色 / 状态位）',
+    SNAP_STRIDE === 19, String(SNAP_STRIDE));
   const b = mk(['taoyao_rong']);
   const bad = b.snapshots.find(s => s.data.length !== b.units.length * SNAP_STRIDE);
   check('每帧快照长度 = 单位数 × 步长', !bad, bad ? '有异常快照' : `每帧 ${b.units.length * SNAP_STRIDE} 个数值`);
@@ -312,7 +329,13 @@ console.log('\n【7】渲染（记录型 2D 上下文）');
 
   const ctx = makeCtx();
   const rd = new Renderer(makeCanvas(ctx));
-  const BOW = SPECIES_BY_ID.taoyao.bow;
+  /* 桃夭有两套弓的美术（荣/枯）。这个诊断跑的都是**荣**的技能，
+     所以固定取第一套；顺便断言一下取到的确实是荣那一套，
+     免得以后 kinds 表一改，这里静默地测了另一把弓。 */
+  const BOW_ALL = SPECIES_BY_ID.taoyao.bow;
+  const BOW = BOW_ALL.arts ? BOW_ALL.arts[0] : BOW_ALL;
+  check('取到的是荣那一套弓的美术（不是枯的）',
+    !!BOW && /taoyao_bow_idle\.png$/.test(BOW.idle), BOW ? BOW.idle : '无');
 
   const has = (calls, frag) => calls.filter(c => c.n === 'drawImage' && c.a[0] &&
     String(c.a[0].src).includes(frag));
@@ -373,7 +396,7 @@ console.log('\n【7】渲染（记录型 2D 上下文）');
     geoChecks.push(['弓高就是配置里的 bowH（世界单位，不能再乘 SCALE）',
       Math.abs(dh - BOW.bowH) < 1e-6, `dh=${dh} bowH=${BOW.bowH}`]);
     /* 宽高比必须与原图一致 —— 拉伸过的弓一眼能看出来 */
-    const srcAspect = 196 / 568;     // 统一画布的宽高比（make-bow-sprites.mjs 的产物）
+    const srcAspect = 196 / 568;     // 统一画布的宽高比（make-sprites.mjs 的产物）
     geoChecks.push(['弓没有被拉伸（宽高比与原图一致）',
       Math.abs(dw / dh - srcAspect) < 0.02,
       `${(dw / dh).toFixed(3)} vs 原图 ${srcAspect.toFixed(3)}`]);
@@ -450,10 +473,13 @@ console.log('\n【7】渲染（记录型 2D 上下文）');
   if (burstChecks.length) for (const [nm, ok, d] of burstChecks) check(nm, ok, d);
   else check('五连发时额外画出 4 根箭矢', false, '没找到五连发的帧');
 
-  /* ---- castKind 不能污染普通单发 ---- */
+  /* ---- castKind 不能污染普通单发 ----
+     这一局装的是荣，所以只该出现荣的两个变体（0 普通 / 1 五连发）。
+     枯那一式（castKind 2）在下面第 10 节单独验 —— 别把"荣这一局"的结论
+     写成"castKind 只能是 0 或 1"，那是错的：枯就是 2。 */
   const kinds = new Set();
   for (const s of b.snapshots) if (s.data[3] > 0.5) kinds.add(s.data[15]);
-  check('castKind 只会取 0 / 1（没有意外的第三种值）',
+  check('装映霞[荣] 时 castKind 只会取 0 / 1（荣的两个变体）',
     [...kinds].every(k => k === 0 || k === 1), `出现过的值：${[...kinds].join(',')}`);
 
   const anyNaN = drawAt(fDraw).some(c => c.a.some(v => typeof v === 'number' && !Number.isFinite(v)));
@@ -474,7 +500,13 @@ console.log('\n【8】飞出去的箭（弹道贴图）');
 
   /* 长度必须等于"弓高 × 箭占弓高的比例" —— 这样搭在弓上的箭和飞出去的箭等长，
      撒放那一瞬间才不会突然变长变短。 */
-  const BOW = SPECIES_BY_ID.taoyao.bow;
+  /* 桃夭有两套弓的美术（荣/枯）。这个诊断跑的都是**荣**的技能，
+     所以固定取第一套；顺便断言一下取到的确实是荣那一套，
+     免得以后 kinds 表一改，这里静默地测了另一把弓。 */
+  const BOW_ALL = SPECIES_BY_ID.taoyao.bow;
+  const BOW = BOW_ALL.arts ? BOW_ALL.arts[0] : BOW_ALL;
+  check('取到的是荣那一套弓的美术（不是枯的）',
+    !!BOW && /taoyao_bow_idle\.png$/.test(BOW.idle), BOW ? BOW.idle : '无');
   const wantLen = BOW.bowH * BOW.arrowLenFrac;
   check('弹道里的箭长 = bowH × arrowLenFrac（与搭在弓上的那支等长）',
     !!entry && Math.abs(entry.len - wantLen) < 1e-6,
@@ -505,9 +537,14 @@ console.log('\n【8】飞出去的箭（弹道贴图）');
     `第 ${shotFrame} 帧，${arrows.length} 支`);
   if (arrows.length) {
     const a = arrows[0].a;
-    check('飞行的箭以弹道中心为原点绘制（碰撞按圆算，图必须居中）',
-      Math.abs(a[1] + a[3] / 2) < 1e-6 && Math.abs(a[2] + a[4] / 2) < 1e-6,
-      `dx=${a[1].toFixed(2)} dy=${a[2].toFixed(2)}`);
+    /* 图的位置 = 判定中心 + 偏移（`spriteOffX/Y`，编辑器里拖判定圆改的就是它）。
+       这条原来写的是"必须正好居中"，后来作者要求判定圆可以拖，规则跟着升级 ——
+       偏移为 0 时它等价于原来的居中。 */
+    const pal0 = (b.projSpritePalette || [])[b.snapshots[shotFrame].proj[9]] || {};
+    const off0 = pal0.offX || 0, off0Y = pal0.offY || 0;
+    check('飞行的箭按（判定中心 + 偏移）绘制（偏移 0 时即居中）',
+      Math.abs(a[1] - (off0 - a[3] / 2)) < 1e-6 && Math.abs(a[2] - (off0Y - a[4] / 2)) < 1e-6,
+      `dx=${a[1].toFixed(2)} dy=${a[2].toFixed(2)}（本枚偏移 ${off0}/${off0Y}）`);
     const pj = b.snapshots[shotFrame].proj;
     const want = Math.atan2(pj[8], pj[7]);
     check('箭矢按飞行方向旋转（dirX/dirY → atan2）',
@@ -520,7 +557,8 @@ console.log('\n【8】飞出去的箭（弹道贴图）');
 console.log('\n【9】整局逐帧渲染（覆盖 castP 的全部取值）');
 {
   /* 上面只抽查了两三帧。弓这条路径会被 castP 从 0 到 1 的每一档喂一遍，
-     而且挑帧逻辑（pickBowFrame）里有"落在区间外兜底"的分支 ——
+     而且挑图逻辑（render.js 的 bowStateSrc：平时 / 拉弓 / 回退成平时）
+     有"落在区间外兜底"的分支 ——
      只测几帧很容易漏掉边界。这里把一整局每一帧都画一遍。 */
   const b = mk(['taoyao_rong', 'taoyao_top']);
   b.runToEnd();
@@ -545,50 +583,258 @@ console.log('\n【9】整局逐帧渲染（覆盖 castP 的全部取值）');
 }
 
 /* ============ 10. 美术配置 ============ */
-console.log('\n【10】美术配置（assets/src → tools/make-bow-sprites.mjs → assets/characters）');
+console.log('\n【10】美术配置（assets/src → tools/make-sprites.mjs → assets/characters）');
 {
   const bow = SPECIES_BY_ID.taoyao.bow;
   check('桃夭挂了弓配置', !!bow, bow ? '有' : '无');
-  check('平时 / 拉弓 两张图都指向 assets/characters',
-    !!bow.idle && !!bow.draw &&
-    bow.idle.includes('assets/characters/') && bow.draw.includes('assets/characters/'),
-    `${bow.idle} / ${bow.draw}`);
-  /* 两张弓帧必须来自同一块统一画布 —— 原始两张图的宽度差 40px，
-     不统一的话换图时弓会横跳。这里用"文件名由同一个工具产出"来守。 */
-  check('两张弓帧是同一套命名（说明出自同一个规整步骤）',
-    /bow_idle\.png$/.test(bow.idle) && /bow_draw\.png$/.test(bow.draw),
-    'taoyao_bow_idle.png / taoyao_bow_draw.png');
-  check('射箭那一帧的状态有定义（shot 留空 = 回退成平时）',
-    bow.shot === null || typeof bow.shot === 'string',
-    bow.shot === null ? 'null（用 idle）' : bow.shot);
 
-  check('锚点 / 搭箭点都是 0~1 的有限数',
-    [bow.anchor.x, bow.anchor.y, bow.nock.x, bow.nock.y]
-      .every(v => Number.isFinite(v) && v >= 0 && v <= 1),
-    `anchor(${bow.anchor.x}, ${bow.anchor.y}) nock(${bow.nock.x}, ${bow.nock.y})`);
-  /* 球心必须和搭箭点同高，否则箭会从球的旁边射出去 */
-  check('球心（anchor.y）与搭箭点（nock.y）同高',
-    Math.abs(bow.anchor.y - bow.nock.y) < 0.01,
-    `anchor.y ${bow.anchor.y} vs nock.y ${bow.nock.y}`);
-  /* 尺寸：弓必须比球高，否则弓臂伸不出球外，等于没有 */
-  check('弓比球高（弓臂能伸出球外）', bow.bowH > SPECIES_BY_ID.taoyao.r * 2,
-    `bowH ${bow.bowH} > 球直径 ${SPECIES_BY_ID.taoyao.r * 2}`);
-  check('箭长比例是有限正数', Number.isFinite(bow.arrowLenFrac) && bow.arrowLenFrac > 0,
-    String(bow.arrowLenFrac));
-  check('五连发的扇形参数完整（总共几发 + 张角的一半）',
-    bow.burst && Number.isFinite(bow.burst.count) && bow.burst.count >= 2 &&
-    Number.isFinite(bow.burst.spreadDeg) && bow.burst.spreadDeg > 0,
-    bow.burst ? `共 ${bow.burst.count} 发，最大张角 ±${bow.burst.spreadDeg}°` : '无');
-  /* 扇形参数必须和技能里的五连发一致 —— 画扇形就是为了预告弹道，
-     两边各写一套数迟早会漂（这次收尾就是发现它们差了整整一倍）。 */
+  /* 桃夭有两式弓（荣 / 枯），长得完全不一样，所以配置是"多套美术 + 一张
+     castKind → 第几套 的表"。先把表的形状钉死，再逐套查几何量。 */
+  const arts = bow.arts;
+  check('弓配置是"多套美术 + kindArt 查表"的形状',
+    Array.isArray(arts) && arts.length >= 2 && Array.isArray(bow.kindArt),
+    `${arts && arts.length} 套，kindArt [${bow.kindArt}]`);
+  check('kindArt 的每一项都指向存在的某一套',
+    bow.kindArt.every(i => Number.isInteger(i) && i >= 0 && i < arts.length),
+    `[${bow.kindArt}] / 共 ${arts.length} 套`);
+  /* 荣和枯必须指向**不同**的套 —— 两式共用一张图就说明表写错了 */
+  check('荣与枯用的是两套不同的美术',
+    bow.kindArt[0] !== bow.kindArt[2],
+    `荣→第 ${bow.kindArt[0]} 套，枯→第 ${bow.kindArt[2]} 套`);
+  /* 渲染层照这张表挑图 —— 断言"挑出来的"和"配置里写的"是同一套。
+     这是渲染层与配置之间唯一的一条缝，必须在这里焊住。 */
+  check('渲染层按 kindArt 挑出来的正是配置里那一套',
+    [0, 1, 2].every(k => pickBowArt(bow, k) === arts[bow.kindArt[k]]),
+    'pickBowArt(0/1/2) === arts[kindArt[0/1/2]]');
+  check('castKind 越界时回退第 0 套（不崩、不画空）',
+    pickBowArt(bow, 99) === arts[0] && pickBowArt(bow, -3) === arts[0],
+    'castKind 99 / -3 → 第 0 套');
+  /* 单一写法（老配置）必须原样返回，别把一套美术当成多套去查表 */
+  check('单一写法的弓配置原样返回',
+    pickBowArt({ idle: 'a.png' }, 0).idle === 'a.png', '无 arts → 返回自身');
+
+  for (let i = 0; i < arts.length; i++) {
+    const art = arts[i];
+    const tag = i === bow.kindArt[0] ? '荣' : (i === bow.kindArt[2] ? '枯' : `第${i}套`);
+    check(`[${tag}] 平时 / 拉弓 两张图都指向 assets/characters`,
+      !!art.idle && !!art.draw &&
+      art.idle.includes('assets/characters/') && art.draw.includes('assets/characters/'),
+      `${art.idle} / ${art.draw}`);
+    /* 两张弓帧必须来自同一块统一画布 —— 荣的原始两张图宽度差 40px、
+       枯差 97px，不统一的话换图时弓会横跳。
+       这里用"文件名由同一个工具产出"来守。 */
+    check(`[${tag}] 两张弓帧是同一套命名（说明出自同一个规整步骤）`,
+      /bow_idle\.png$/.test(art.idle) && /bow_draw\.png$/.test(art.draw),
+      `${art.idle} / ${art.draw}`);
+    check(`[${tag}] 射箭那一帧的状态有定义（shot 留空 = 回退成平时）`,
+      art.shot === null || typeof art.shot === 'string',
+      art.shot === null ? 'null（用 idle）' : art.shot);
+
+    check(`[${tag}] 锚点 / 搭箭点都是 0~1 的有限数`,
+      [art.anchor.x, art.anchor.y, art.nock.x, art.nock.y]
+        .every(v => Number.isFinite(v) && v >= 0 && v <= 1),
+      `anchor(${art.anchor.x}, ${art.anchor.y}) nock(${art.nock.x}, ${art.nock.y})`);
+    /* 球心必须和搭箭点同高，否则箭会从球的旁边射出去 */
+    check(`[${tag}] 球心（anchor.y）与搭箭点（nock.y）同高`,
+      Math.abs(art.anchor.y - art.nock.y) < 0.01,
+      `anchor.y ${art.anchor.y} vs nock.y ${art.nock.y}`);
+    /* 尺寸：弓必须比球高，否则弓臂伸不出球外，等于没有 */
+    check(`[${tag}] 弓比球高（弓臂能伸出球外）`, art.bowH > SPECIES_BY_ID.taoyao.r * 2,
+      `bowH ${art.bowH} > 球直径 ${SPECIES_BY_ID.taoyao.r * 2}`);
+    check(`[${tag}] 箭长比例是有限正数`,
+      Number.isFinite(art.arrowLenFrac) && art.arrowLenFrac > 0,
+      String(art.arrowLenFrac));
+    check(`[${tag}] 箭矢贴图也配了`, !!art.arrow, art.arrow || '无');
+    /* 搭箭点必须在球心**前方**（弓的局部坐标系里 +X 朝敌人）——
+       在球后面的搭箭点等于把箭搭反了。两式的锚点差得很远
+       （0.426 vs 0.686），这条对枯尤其重要。 */
+    check(`[${tag}] 搭箭点在球心前方（局部 +X 侧）`, art.nock.x < art.anchor.x,
+      `nock.x ${art.nock.x} < anchor.x ${art.anchor.x}`);
+
+    /* ---------- 两帧必须是同一块画布 ----------
+       这是"对齐"这一步存在的全部理由：两帧各自居中画的话，
+       换成另一张图时弓会横跳（荣差 40px、枯差得更多）。
+       所以直接量**成品图的像素尺寸** —— 尺寸一致 + 锚点一致，
+       换图时画出来的位置就严丝合缝。
+       只查文件名（"同一套命名"那条）是不够的：名字对、尺寸错照样会跳。 */
+    const dIdle = DIM.get(art.idle), dDraw = DIM.get(art.draw);
+    check(`[${tag}] 平时 / 拉弓两张成品图是同一块画布（换图不会横跳）`,
+      !!dIdle && !!dDraw && dIdle.w === dDraw.w && dIdle.h === dDraw.h,
+      dIdle && dDraw ? `${dIdle.w}×${dIdle.h} vs ${dDraw.w}×${dDraw.h}` : '读不到尺寸');
+    /* 顺带把"锚点确实落在图内"也钉住 —— 锚点是比例值，写错到 1.5 也不会报错 */
+    check(`[${tag}] 球心 / 搭箭点都落在图内`,
+      art.anchor.x > 0 && art.anchor.x < 1 && art.anchor.y > 0 && art.anchor.y < 1 &&
+      art.nock.x >= 0 && art.nock.x < 1,
+      `anchor(${art.anchor.x}, ${art.anchor.y}) nock.x ${art.nock.x}`);
+  }
+
+  /* 五连发是荣独有的：只有荣那套该有 burst，枯给了 burst 反而是配错了。 */
   {
     const RONG = TAOYAO.rong;
+    const rongArt = arts[TAOYAO.RONG_ART];
+    const kuArt = arts[TAOYAO.KU_ART];
     const wantDeg = (RONG.burstSpread * 180) / Math.PI;
+    check('五连发的扇形参数完整（总共几发 + 张角的一半）',
+      !!rongArt.burst && Number.isFinite(rongArt.burst.count) && rongArt.burst.count >= 2 &&
+      Number.isFinite(rongArt.burst.spreadDeg) && rongArt.burst.spreadDeg > 0,
+      rongArt.burst ? `共 ${rongArt.burst.count} 发，最大张角 ±${rongArt.burst.spreadDeg}°` : '无');
+    /* 扇形参数必须和技能里的五连发一致 —— 画扇形就是为了预告弹道，
+       两边各写一套数迟早会漂（收尾时就发现它们差了整整一倍）。 */
     check('弓配置的扇形与技能的五连发一致（数量 / 张角）',
-      bow.burst.count === RONG.burstCount && Math.abs(bow.burst.spreadDeg - wantDeg) < 0.1,
-      `弓 ${bow.burst.count} 发 ±${bow.burst.spreadDeg}° vs 技能 ${RONG.burstCount} 发 ±${wantDeg.toFixed(2)}°`);
+      rongArt.burst.count === RONG.burstCount &&
+      Math.abs(rongArt.burst.spreadDeg - wantDeg) < 0.1,
+      `弓 ${rongArt.burst.count} 发 ±${rongArt.burst.spreadDeg}° vs 技能 ${RONG.burstCount} 发 ±${wantDeg.toFixed(2)}°`);
+    check('枯没有五连发（那套不该画扇形）', !kuArt.burst, kuArt.burst ? '有' : 'null');
+
+    /* ---------- 把"画出来的扇形"和"真正飞出去的箭"对上 ----------
+       上面那条比的是两个**配置数**（balls.js 的 spreadDeg vs skills.js 的
+       burstSpread）。配置对得上，不代表渲染层真的按那条公式画 ——
+       渲染层以前自己抄了一份公式，而且抄错了（24° 画成 14°）。
+       所以这里量的是**可观测量**：跑一局，抓一次 arrowBurst 事件，
+       取那一批箭的真实速度方向，再和 burstOffsetsDeg() 给出的偏角逐根比。
+       这样"画扇形"与"发箭"之间只要有任何一处漂，这里立刻红。 */
+    const bb = mk(['taoyao_rong']);
+    bb.runToEnd();
+    const burstEv = bb.events.find(e => e.type === 'arrowBurst');
+    check('跑出了一次五连发（才有东西可比）', !!burstEv,
+      burstEv ? `第 ${burstEv.f} 帧，${burstEv.value} 发` : '没出现');
+    if (burstEv) {
+      /* 只挑**这一帧刚出膛**的箭：快照里的 lifeT（剩余寿命比例）刚生成时
+         最接近 1，而上一轮还在飞的箭已经掉到 0.36 左右。
+         不筛的话会把在飞的旧箭一起数进来 —— 第一次写这条就栽在这里：
+         数出"6 支"，角度也被旧箭带偏。 */
+      const sm = bb.snapshots[snapOf(burstEv)];
+      const cand = [];
+      for (let i = 0; i < sm.proj.length; i += PROJ_STRIDE) {
+        if (sm.proj[i + 9] < 0) continue;               // 不是贴图弹道 = 不是箭
+        cand.push({ lifeT: sm.proj[i + 3], ang: Math.atan2(sm.proj[i + 8], sm.proj[i + 7]) * (180 / Math.PI) });
+      }
+      /* "刚出膛"用**相对**判据：这一批箭的 lifeT 是全场最大的，
+         凡是和它差不到 2% 的都算同一批。写死一个绝对阈值（比如 >0.99）
+         会随箭的寿命长短而失效 —— 第一版就是这么错的，结果一支都没筛出来。 */
+      const maxT = cand.reduce((m, c) => Math.max(m, c.lifeT), -Infinity);
+      const angs = cand.filter(c => maxT - c.lifeT < 0.02).map(c => c.ang);
+      check('五连发那一帧射出的箭数与弓配置一致',
+        angs.length === rongArt.burst.count,
+        `${angs.length} 支 vs 配置 ${rongArt.burst.count} 支`);
+      /* 以正中那一根为基准算各根偏角：five 根对称，中位数就是正中那根 */
+      angs.sort((a, b) => a - b);
+      const base = angs[angs.length >> 1];
+      const fly = angs.map(v => v - base).filter(v => Math.abs(v) > 1e-6).sort((a, b) => a - b);
+      const drawn = burstOffsetsDeg(rongArt.burst).slice().sort((a, b) => a - b);
+      const maxErr = (fly.length === drawn.length)
+        ? Math.max(...drawn.map((w, i) => Math.abs(w - fly[i])))
+        : Infinity;
+      check('画出来的扇形与真正飞出去的箭逐根对齐（±0.5°）',
+        maxErr < 0.5,
+        `最大偏差 ${maxErr === Infinity ? '—' : maxErr.toFixed(3)}°；` +
+        `飞出去 [${fly.map(v => v.toFixed(1)).join(', ')}]° vs 画的 [${drawn.map(v => v.toFixed(1)).join(', ')}]°`);
+    }
+
+    /* 技能里的编号必须落在表里，且荣 / 枯各自指到该指的那套 ——
+       这条把 skills.js 的 RONG_ART / KU_ART 和 balls.js 的 kindArt 焊在一起。 */
+    check('技能里的荣 / 枯编号与弓的美术表一致',
+      bow.kindArt[0] === TAOYAO.RONG_ART && bow.kindArt[2] === TAOYAO.KU_ART &&
+      bow.kindArt[1] === bow.kindArt[0],
+      `kindArt[0]=${bow.kindArt[0]} 荣，kindArt[2]=${bow.kindArt[2]} 枯，kindArt[1]=${bow.kindArt[1]}（五连发用荣）`);
   }
-  check('箭矢贴图也配了', !!bow.arrow, bow.arrow || '无');
+
+  /* 图得真的在磁盘上 —— 配置写了文件名但文件不存在，
+     运行时只会静默不画（getSticker 加载失败就跳过）。 */
+  {
+    const missing = [];
+    let n = 0;
+    for (const art of arts) {
+      for (const k of ['idle', 'draw', 'arrow']) {
+        if (typeof art[k] !== 'string') continue;
+        n++;
+        try { readFileSync(art[k]); } catch { missing.push(art[k]); }
+      }
+    }
+    check('弓的每张图都真的存在（不是只写了文件名）',
+      missing.length === 0 && n === arts.length * 3,
+      missing.length ? missing.join(' / ') : `${n} 张全在`);
+  }
+
+  /* ---------- 弓的朝向：**每一帧都必须摆成朝 +X** ----------
+     assets/characters 里的弓图是 tools/make-sprites.mjs 的产物，
+     它会替作者把"画反了手"的那一帧左右镜像过来 —— 枯的「平时」那张就是
+     （实测：弦在右、弓臂鼓向左，跟它自己的「拉弓」和荣的两张都相反）。
+     这里读**成品图**再验一遍：万一有人直接换掉 assets/characters 里的文件、
+     或者哪天忘了跑构建，游戏里就会举着一把反的弓，
+     而画面上只是"看起来有点怪"，不会有任何报错。
+     判据与构建脚本共用 tools/lib/bow-facing.mjs 里那一份。 */
+  {
+    const faced = [];
+    for (const art of arts) {
+      for (const k of ['idle', 'draw']) {
+        if (typeof art[k] !== 'string') continue;
+        const f = bowFacing(await rawOf(art[k]));
+        faced.push({ file: art[k].replace('assets/characters/', ''), dir: f.dir, what: f.what });
+      }
+    }
+    const bad = faced.filter(f => f.dir !== 1);
+    check('每张弓图都朝 +X（弦在身后、弓臂朝前）', bad.length === 0,
+      bad.length ? bad.map(f => `${f.file}（${f.what}）`).join('；')
+        : `${faced.length} 张：${faced.map(f => f.file).join('、')}`);
+    /* 两帧的朝向还要**一致**：不一致就是"一举弓是正的、一拉弓翻过来"。
+       这条比单张朝向更接近玩家看到的现象，所以单独钉一条。 */
+    const perArt = arts.map(art => ({
+      idle: faced.find(f => f.file === String(art.idle).replace('assets/characters/', '')),
+      draw: faced.find(f => f.file === String(art.draw).replace('assets/characters/', '')),
+    }));
+    const flip = perArt.filter(p => p.idle && p.draw && p.idle.dir !== p.draw.dir);
+    check('同一把弓的平时 / 拉弓两帧朝向一致（不会一拉弓就左右翻）',
+      flip.length === 0,
+      flip.length ? flip.map(p => `${p.idle.file} vs ${p.draw.file}`).join('；')
+        : `${perArt.length} 套两帧一致`);
+  }
+
+  /* ---------- castKind 的语义：它说的是"这个单位现在该用哪套弓" ----------
+     不是"这一发的变体"。**没在拉弓时归 0 是错的** ——
+     0 在 kindArt 表里是荣，于是只装「映霞[枯]」的桃夭平时举着荣那把粉弓，
+     只有拉弓那 2 秒才变回花枝弓。实测就是这么错的：
+     362 帧里恰好第 1 帧（构造函数记的那一帧）是 0，开战瞬间闪一下粉弓。
+     所以这里逐帧看：枯那局整局都必须是"枯那一式"，荣那局必须始终是荣那一式。 */
+  {
+    const kuKind = bow.kindArt.indexOf(TAOYAO.KU_ART);
+    const rongKind = bow.kindArt.indexOf(TAOYAO.RONG_ART);
+    check('枯那一式的 castKind 是搜出来的那个值（不是写死的 2）', kuKind > 0,
+      `castKind ${kuKind} → 第 ${bow.kindArt[kuKind]} 套`);
+
+    const kuB = mk(['taoyao_ku'], { timeLimit: 20 });
+    kuB.runToEnd();
+    const kuKinds = new Set();
+    let kuBad = 0;
+    for (const s of kuB.snapshots) {
+      const k = s.data[15] || 0;
+      kuKinds.add(k);
+      if (pickBowArt(kuB.units[0].bow, k) !== arts[TAOYAO.KU_ART]) kuBad++;
+    }
+    check('只装映霞[枯] 时，每一帧的 castKind 都指向枯那一套（平时也不例外）',
+      kuBad === 0,
+      kuBad ? `${kuBad}/${kuB.snapshots.length} 帧指错` :
+        `${kuB.snapshots.length} 帧全部指向枯，出现过的 castKind [${[...kuKinds]}]`);
+
+    const rongB = mk(['taoyao_rong'], { timeLimit: 20 });
+    rongB.runToEnd();
+    const rongKinds = new Set();
+    let rongBad = 0;
+    for (const s of rongB.snapshots) {
+      const k = s.data[15] || 0;
+      rongKinds.add(k);
+      if (pickBowArt(rongB.units[0].bow, k) !== arts[TAOYAO.RONG_ART]) rongBad++;
+    }
+    check('只装映霞[荣] 时，每一帧的 castKind 都指向荣那一套',
+      rongBad === 0,
+      rongBad ? `${rongBad}/${rongB.snapshots.length} 帧指错` :
+        `${rongB.snapshots.length} 帧全部指向荣，出现过的 castKind [${[...rongKinds]}]`);
+    check('荣那一局不会报出枯的 castKind', !rongKinds.has(kuKind),
+      `[${[...rongKinds]}]，枯是 ${kuKind}`);
+    check('荣的两种变体都出现过（普通 + 五连发）',
+      [...rongKinds].sort().join(',') === [rongKind, rongKind + 1].sort().join(','),
+      `[${[...rongKinds]}]`);
+  }
 
   const stats = makeUnitStats('taoyao');
   check('makeUnitStats 把弓带进了单位属性', !!stats.bow, stats.bow ? '有' : '无');

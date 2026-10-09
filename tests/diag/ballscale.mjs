@@ -1,6 +1,7 @@
 /* Diagnostic: with doubled ball radius, check (a) no spawn overlap,
    (b) collision frequency, (c) match pacing.
    (ASCII only.) */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, makeUnitStats, BALL_SCALE, SCALE } from '../../js/balls.js';
@@ -65,7 +66,7 @@ for (const [a, bm, label] of [
 }
 
 console.log('\n=== (c) all arena types still resolve ===');
-for (const arenaId of ['rect', 'circle', 'octagon', 'triangle', 'diamond', 'lava_center', 'shrink_ring', 'chaos']) {
+for (const arenaId of ['rect', 'circle', 'octagon', 'triangle', 'diamond', 'shrink_ring']) {
   const bt = mk(['test', 'test'], ['test', 'test'], arenaId, 31);
   while (!bt.over && bt.frame < bt.maxFrames) bt.step();
   console.log(`  ${arenaId.padEnd(13)} ${(bt.frame / 60).toFixed(1).padStart(6)}s  ${bt.endReason}`);

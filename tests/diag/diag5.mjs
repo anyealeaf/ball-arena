@@ -1,4 +1,5 @@
-﻿/* 3 鏂规贩鎴樻畫灞€绮炬煡锛氫负浠€涔堟斁澶т激瀹?鎵╁ぇ鍒ゅ畾鑼冨洿涔嬪悗杩樻槸闆朵激瀹?*/
+/* 3 鏂规贩鎴樻畫灞€绮炬煡锛氫负浠€涔堟斁澶т激瀹?鎵╁ぇ鍒ゅ畾鑼冨洿涔嬪悗杩樻槸闆朵激瀹?*/
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, makeUnitStats, SCALE } from '../../js/balls.js';

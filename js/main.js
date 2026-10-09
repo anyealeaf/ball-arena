@@ -5,8 +5,52 @@
 import { renderCodex } from './ui-codex.js';
 import { renderPrepare } from './ui-prepare.js';
 import { renderBattle } from './ui-battle.js';
+import { installLiveReload } from './live-reload.js';
 
 const root = document.getElementById('app');
+
+/* ============================================================
+   素材 / 数值改完之后的"刷新提示"
+   ------------------------------------------------------------
+   编辑器是另一个标签页。它保存成功后会在 localStorage 里留一条消息，
+   这里收到（同源跨标签页的 storage 事件）就弹一个小条：
+   **为什么要刷新**：引擎在页面加载时把 balls.js / skills.js 读进内存，
+   改完源码它不会自己知道；就算重新 import 也是第二个模块实例，
+   引擎手里还是旧的那份。所以"刷新"是必须的一步，
+   那就别让作者自己去想 Ctrl+F5 —— 点一下这个按钮就行。
+   ============================================================ */
+let assetToast = null, assetToastTimer = 0;
+
+function showAssetToast(info) {
+  if (!document.body) return;
+  if (!assetToast) {
+    assetToast = document.createElement('div');
+    assetToast.className = 'asset-toast';
+    document.body.appendChild(assetToast);
+  }
+  /* summary 来自编辑器（字段名 + 改前 → 改后）。它进的是 innerHTML，
+     所以把尖括号之类全部转义掉 —— 字段名是中文，但没必要赌它永远干净。 */
+  const summary = String((info && info.summary) || '')
+    .replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+  assetToast.innerHTML =
+    '<div class="at-head"><b>素材已更新</b>' +
+    '<span class="hint">数值改完要刷新页面才会生效</span></div>' +
+    (summary ? `<div class="at-sum mono">${summary}</div>` : '') +
+    '<div class="at-btns">' +
+    '<button class="btn sm primary" id="assetReload">点击刷新</button>' +
+    '<button class="btn sm" id="assetLater">稍后</button>' +
+    '</div>';
+  assetToast.classList.add('show');
+  const reloadBtn = assetToast.querySelector('#assetReload');
+  const laterBtn = assetToast.querySelector('#assetLater');
+  if (reloadBtn) reloadBtn.onclick = () => location.reload();
+  if (laterBtn) laterBtn.onclick = () => assetToast.classList.remove('show');
+  clearTimeout(assetToastTimer);
+  /* 30 秒后自己收起来：不挡住看对局 */
+  assetToastTimer = setTimeout(() => assetToast && assetToast.classList.remove('show'), 30000);
+}
+
+installLiveReload(showAssetToast);
 
 /**
  * 调试辅助：
@@ -38,6 +82,14 @@ const MENU = [
     ic: '⚔️',
     title: '斗蛐蛐准备',
     desc: '设置队伍数量、场地、参与小球与特殊规则。开战之后就不再干预，所以配置决定胜负。'
+  },
+  {
+    /* 单开一个页面（不是哈希路由里的界面）：它不参与战斗流程，
+       只是调素材与数值的工具，改完写回 js/*.js。 */
+    href: 'assets-editor.html',
+    ic: '🎛️',
+    title: '素材编辑器',
+    desc: '可视化调尺寸、透明度与光晕，也能改血量 / 速度 / 技能伤害等平衡数值；改完一键写回配置。'
   }
 ];
 
@@ -49,7 +101,7 @@ function renderMenu() {
     <p class="lead">选择要进行的操作。</p>
     <div class="menu">
       ${MENU.map(m => `
-        <a class="menu-card" href="${m.hash}" style="text-decoration:none;color:inherit">
+        <a class="menu-card" href="${m.href || m.hash}" style="text-decoration:none;color:inherit">
           <span class="ic">${m.ic}</span>
           <h3>${m.title}</h3>
           <p>${m.desc}</p>
@@ -59,9 +111,10 @@ function renderMenu() {
     <div class="card" style="margin-top:18px">
       <h3>当前阶段说明</h3>
       <p class="hint" style="margin:0">
-        框架已搭好，小球暂时只有测试用的空白球（无技能、1000 生命、碰撞 100 伤害）。
-        技能与角色立绘的接口均已预留：<span class="mono">balls.js</span> 里的
-        <span class="mono">skills</span> 与 <span class="mono">image</span> 字段填上内容即可生效，引擎无需改动。
+        目前有四个球种：<b>晕彩</b>（7 技能）、<b>桃夭</b>（5 技能）、<b>缇娜</b>（7 技能），
+        以及演示用的<b>木桩</b>（不移动、5000 血，拿它当靶子看技能效果最直观）。
+        新角色与立绘的接口均已预留：<span class="mono">balls.js</span> 里的
+        <span class="mono">skills</span> / <span class="mono">sticker</span> 字段填上内容即可生效，引擎无需改动。
       </p>
     </div>
   `;

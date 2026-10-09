@@ -10,6 +10,7 @@
  *
  * 用法：node tests/diag/finish-rate.mjs [每场最大秒数]
  */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle } from '../../js/core.js';
 import { ARENAS } from '../../js/arenas.js';
 import { DEFAULT_RULES, makeUnitStats } from '../../js/balls.js';
@@ -21,7 +22,14 @@ const SIZES = [1, 2, 3];
 const RULES = { ...DEFAULT_RULES };
 
 /* 也要覆盖带技能的小球：蓄力冲刺会让球停下来蓄力 2 秒再冲出去，
-   这种"主动停住"的行为正是最可能拖住对局的东西，必须一起扫。 */
+   这种"主动停住"的行为正是最可能拖住对局的东西，必须一起扫。
+
+   ⚠ 这里扫的是**诊断夹具那几颗测试球**（tests/lib/test-balls.mjs），不是游戏球种 ——
+   要的是"纯物理基准"（普通球）与"会主动停住的球"（技能球）。
+   新加的**木桩**刻意不在这个表里：它速度恒为 0、自己不会走向对手，
+   两个木桩对打当然打不完（那是"靶子"的必然结果，不是僵局）。
+   木桩的行为由 tests/diag/dummy.mjs 专门盯：
+   「木桩 vs 角色能自然收场」「两个木桩要靠时间上限收场」。 */
 const SPECIES_SETS = [
   { label: '普通球    ', id: 'test' },
   { label: '技能球    ', id: 'test_skill' },

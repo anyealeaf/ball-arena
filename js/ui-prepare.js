@@ -10,12 +10,50 @@ import {
   TIME_LIMIT_OPTIONS, MAX_TEAMS, teamColor, makeUnitStats,
   MAX_SKILLS_PER_UNIT, defaultSkillsFor, normalizeSkills
 } from './balls.js';
-import { getSkill, skillDesc, resolveLoadout, conflictsWithChosen } from './skills.js';
-import { getSkillDetail, setSkillDetail, onPrefsChange } from './prefs.js';
+import { getSkill, skillDesc, resolveLoadout, conflictsWithChosen, manualSkillIds } from './skills.js';
+import {
+  getSkillDetail, setSkillDetail, onPrefsChange, getDetailOpen, setDetailOpen,
+  getPlayerKeys, setPlayerKeys, keyLabel, DEFAULT_PLAYER_KEYS, MAX_PLAYER_KEYS,
+} from './prefs.js';
 import { ARENAS, ARENA_BY_ID, zoneLabel, effectLabels } from './arenas.js';
 import { sketchArena, sketchBall } from './sketch.js';
 
 const STORAGE_KEY = 'ballBattle.prepare.v1';
+
+/* ---------- 玩家按键的"按下新键"捕捉 ----------
+   放在**模块级**、监听只注册一次。为什么不能写在 renderPrepare 里：
+   route() 每次切界面都会重跑 renderPrepare，渲染一次就注册一对 window 监听的话，
+   来回切几趟就会积一堆 —— 按一下键会连改好几个键位（第一版就是这么写的）。
+   另外监听里必须确认"那个键位列表还在页面上"（isConnected）：
+   切到战斗界面之后残留的捕捉状态不该再吞键盘事件。 */
+const kbCapture = { at: null, host: null, apply: null };
+let kbBound = false;
+
+function kbHandle(code, ev) {
+  if (kbCapture.at == null) return false;
+  /* "那个键位列表还在树上吗"：用 parentNode 判，不用 isConnected ——
+     准备界面整体渲染在一个容器里，容器本身**未必挂在 document 上**
+     （诊断脚本就是拿一个游离的 div 渲染的），用 isConnected 会把正常的
+     改键操作一起挡掉。换成"有没有被重新渲染掉"这个真正要防的情况：
+     重绘之后旧节点会从父节点上摘下来，parentNode 变成 null。 */
+  if (!kbCapture.host || !kbCapture.host.parentNode) { kbCapture.at = null; return false; }
+  ev.preventDefault();
+  ev.stopPropagation();
+  const apply = kbCapture.apply;
+  const at = kbCapture.at;
+  kbCapture.at = null;
+  if (apply) apply(code === 'Escape' ? null : code, at);
+  return true;
+}
+
+function bindKbCapture() {
+  if (kbBound) return;
+  kbBound = true;
+  window.addEventListener('keydown', e => { kbHandle(e.code, e); }, true);
+  window.addEventListener('mousedown', e => { kbHandle('Mouse' + e.button, e); }, true);
+  /* 右键要顺手挡掉系统菜单，否则绑完右键会弹出上下文菜单 */
+  window.addEventListener('contextmenu', e => { if (kbCapture.at != null) e.preventDefault(); }, true);
+}
 
 /* 每个队伍最多 / 最少放几个小球 */
 const MIN_PER_TEAM = 1;
@@ -23,6 +61,9 @@ const MAX_PER_TEAM = 20;
 
 export function renderPrepare(root, onStart) {
   /* ---------- 状态 ---------- */
+  /* 上一次渲染留下的"正在改键"状态要清掉：重绘之后那个键位已经不在了，
+     留着它会让下一次按键莫名其妙地改到一个看不见的键位上。 */
+  kbCapture.at = null;
   const saved = loadSaved();
   // 首个球种非测试球时，说明是旧结构的存档，直接弃用，避免读到不兼容的数据
   const savedLooksValid = saved && Array.isArray(saved.species)
@@ -74,10 +115,13 @@ export function renderPrepare(root, onStart) {
     const arr = state.species[t];
     const lo = state.loadouts[t];
     /* 先把"球种变了但装配还是旧的"这种不一致修掉：
-       装配里出现了当前球种没有的技能，就整格回落到默认装配。 */
+       装配里出现了当前球种没有的技能，就整格回落到默认装配。
+       **必须带上 skillCap()**：不带的话 normalizeSkills 按默认上限 3 截断，
+       于是开着无限火力也会被这里悄悄砍回 3 个（这就是"勾了不生效"的根因）。 */
+    const cap = skillCap();
     for (let i = 0; i < arr.length; i++) {
       if (!Array.isArray(lo[i])) continue;
-      const fixed = normalizeSkills(arr[i], lo[i]);
+      const fixed = normalizeSkills(arr[i], lo[i], cap);
       if (fixed.length !== lo[i].length || fixed.some((v, k) => v !== lo[i][k])) lo[i] = fixed;
     }
     while (arr.length < n) arr.push(DEFAULT_SPECIES_ID);
@@ -90,7 +134,7 @@ export function renderPrepare(root, onStart) {
        后来补了 7 个技能，老存档里那格还是空的，玩家看到的就是"技能全都没特效"。
        现在 null 一路保持到读取端，由 equippedOf() 现算。 */
     for (let i = 0; i < n; i++) {
-      if (lo[i] !== null && lo[i] !== undefined) lo[i] = normalizeSkills(arr[i], lo[i]);
+      if (lo[i] !== null && lo[i] !== undefined) lo[i] = normalizeSkills(arr[i], lo[i], cap);
     }
     lo.length = n;
   }
@@ -100,7 +144,11 @@ export function renderPrepare(root, onStart) {
   function equippedOf(t, i) {
     const raw = state.loadouts[t] && state.loadouts[t][i];
     if (raw === null || raw === undefined) return defaultSkillsFor(state.species[t][i]);
-    return normalizeSkills(state.species[t][i], raw);
+    /* 同样必须带 skillCap()：这个函数是**面板勾选框、汇总统计、下一次点击的起点**
+       三处的共同数据源。不带上限的话它会返回被截断的 3 个，
+       于是"点第 4 个 → 存档进了 4 个 → 面板重绘读回 3 个 → 看起来点不动"，
+       而且永远长不到第 5 个（每次都从被截断的 3 个重建）。 */
+    return normalizeSkills(state.species[t][i], raw, skillCap());
   }
   for (let t = 0; t < MAX_TEAMS; t++) ensureSpecies(t, state.teamSizes[t]);
 
@@ -128,7 +176,7 @@ export function renderPrepare(root, onStart) {
         <!-- 场地 -->
         <div class="card">
           <h3>场地</h3>
-          <p class="hint" style="margin:0 0 10px">几何场地免费，带特殊效果与动态机制的场地会改变战术。</p>
+          <p class="hint" style="margin:0 0 10px">只有几何形状的区别：形状决定撞墙角度与可走位空间。</p>
           <div class="arena-grid" id="arenaGrid"></div>
 
           <div class="field" style="margin-top:14px">
@@ -151,53 +199,76 @@ export function renderPrepare(root, onStart) {
           <p class="hint" style="margin:0 0 10px">
             设置每队参战数量与具体球种。每队 ${MIN_PER_TEAM}–${MAX_PER_TEAM} 个。
           </p>
+
+          <!-- 技能规则：这两条直接决定"技能怎么来"，所以放在选技能的地方 -->
+          <div class="skill-rules">
+            <label class="chk">
+              <input type="checkbox" id="rUnlimited" ${state.rules.unlimitedSkills ? 'checked' : ''}>
+              <span><span class="t">无限火力</span>
+              <span class="d">不限制技能数量：可以把一个球种的技能<b>全带上</b>，
+              也可以一个都不带。（互斥的二选一仍然生效 —— 那是设计，不是数量上限。）</span></span>
+            </label>
+            <label class="chk">
+              <input type="checkbox" id="rRandomSkill" ${state.rules.randomSkills ? 'checked' : ''}>
+              <span><span class="t">随机技能</span>
+              <span class="d">配置时<b>不能选技能</b>；开战前每颗球用三格老虎机抽出本局的技能
+              （只从它自己的技能池里抽），抽完才开打。</span></span>
+            </label>
+          </div>
+
           <div id="teamsHost"></div>
           <div class="btnrow" style="margin-top:8px">
             <button class="btn sm" id="mirrorBtn">让所有队伍使用同一套阵容</button>
           </div>
         </div>
-
-        <!-- 开局冲量方向 -->
-        <div class="card">
-          <h3>开局冲量方向</h3>
-          <p class="hint" style="margin:0 0 10px">
-            开局时给每个小球一个<b>力道相等、方向不同</b>的初速。之后就靠弹性碰撞自行发展 ——
-            没有外力时小球只会做匀速直线运动，撞墙或撞球才改变方向。
-          </p>
-
-          <div class="seg" id="spawnModeSeg" style="margin-bottom:10px">
-            <button data-mode="random">方向随机</button>
-            <button data-mode="custom">我来指定方向</button>
-          </div>
-
-          <div id="randomOpts">
-            <div class="hint">
-              每个小球会得到一个方向随机的初速，方向由本局种子决定 ——
-              同一条种子必然得到同一套方向。想改力道或弹性，见右侧「特殊选项」。
-            </div>
-          </div>
-
-          <div id="customOpts" style="display:none">
-            <div class="btnrow" style="margin-bottom:8px">
-              <span class="hint">批量设置：</span>
-              <button class="btn sm" data-preset="inward">朝场地中心</button>
-              <button class="btn sm" data-preset="outward">朝外扩散</button>
-              <button class="btn sm" data-preset="spread">均匀铺开</button>
-              <button class="btn sm" data-preset="random">随机</button>
-            </div>
-            <div class="hint" style="margin-bottom:8px">
-              拖动下面的圆盘即可改变方向（橙色箭头即该球的出发方向）。
-            </div>
-            <div id="angleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:6px"></div>
-          </div>
-        </div>
       </div>
 
       <div>
-        <!-- 特殊选项 -->
+        <!-- 详细设置：特殊规则 + 运动参数 + 开局冲量方向都收在这里 -->
         <div class="card">
-          <h3>特殊选项</h3>
-          <div id="rulesHost"></div>
+          <h3>详细设置</h3>
+          <p class="hint" style="margin:0 0 10px">
+            特殊规则、运动参数与开局冲量方向都在这里。默认收起 —— 不动它们就是标准玩法。
+          </p>
+          <button class="btn" id="detailBtn" style="width:100%"></button>
+          <div id="detailPanel" style="display:none;margin-top:14px">
+
+            <div class="subhead">开局冲量方向</div>
+            <p class="hint" style="margin:6px 0 10px">
+              开局时给每个小球一个<b>力道相等、方向不同</b>的初速。之后就靠弹性碰撞自行发展 ——
+              没有外力时小球只会做匀速直线运动，撞墙或撞球才改变方向。
+            </p>
+
+            <div class="seg" id="spawnModeSeg" style="margin-bottom:10px">
+              <button data-mode="random">方向随机</button>
+              <button data-mode="custom">我来指定方向</button>
+            </div>
+
+            <div id="randomOpts">
+              <div class="hint">
+                每个小球会得到一个方向随机的初速，方向由本局种子决定 ——
+                同一条种子必然得到同一套方向。想改力道或弹性，见下面的「运动参数」。
+              </div>
+            </div>
+
+            <div id="customOpts" style="display:none">
+              <div class="btnrow" style="margin-bottom:8px">
+                <span class="hint">批量设置：</span>
+                <button class="btn sm" data-preset="inward">朝场地中心</button>
+                <button class="btn sm" data-preset="outward">朝外扩散</button>
+                <button class="btn sm" data-preset="spread">均匀铺开</button>
+                <button class="btn sm" data-preset="random">随机</button>
+              </div>
+              <div class="hint" style="margin-bottom:8px">
+                拖动下面的圆盘即可改变方向（橙色箭头即该球的出发方向）。
+              </div>
+              <div id="angleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:6px"></div>
+            </div>
+
+            <div style="border-top:2px solid var(--line);margin:16px 0 12px"></div>
+            <div class="subhead">特殊选项</div>
+            <div id="rulesHost" style="margin-top:8px"></div>
+          </div>
         </div>
 
         <!-- 开战 -->
@@ -218,6 +289,57 @@ export function renderPrepare(root, onStart) {
   const arenaGrid = root.querySelector('#arenaGrid');
   const arenaInfo = root.querySelector('#arenaInfo');
   const rulesHost = root.querySelector('#rulesHost');
+  const detailPanel = root.querySelector('#detailPanel');
+  const detailBtn = root.querySelector('#detailBtn');
+
+  /* ---------- 详细设置：展开 / 收起 ----------
+     状态记在 prefs 里（与"技能描述用简要还是详细"同一套机制），
+     所以来回切界面、刷新页面都不会把它折回去。 */
+  function drawDetailToggle() {
+    const open = getDetailOpen();
+    detailPanel.style.display = open ? 'block' : 'none';
+    detailBtn.textContent = open ? '收起详细设置' : '展开详细设置';
+    detailBtn.classList.toggle('on', open);
+  }
+  detailBtn.onclick = () => { setDetailOpen(!getDetailOpen()); drawDetailToggle(); };
+
+  /* ---------- 技能规则：无限火力 / 随机技能 ----------
+     两条都写进 state.rules（跟特殊选项一起存档），
+     界面上的即时影响是"技能装配面板还能不能选、能选几个"。 */
+  function drawSkillRules() {
+    const un = root.querySelector('#rUnlimited');
+    const rs = root.querySelector('#rRandomSkill');
+    if (!un || !rs) return;
+    un.checked = !!state.rules.unlimitedSkills;
+    rs.checked = !!state.rules.randomSkills;
+    /* 勾选状态以**事件里的 target** 为准，没有事件（直接调 onchange()）才回退读元素。
+       浏览器里点复选框会先改 .checked 再触发 change，两种写法都对；
+       但无头测试是合成事件，不读 target 就会"点了没反应"（踩过）。 */
+    const checkedOf = (el, e) => (e && e.target && 'checked' in e.target ? !!e.target.checked : !!el.checked);
+    un.onchange = (e) => {
+      state.rules.unlimitedSkills = checkedOf(un, e);
+      un.checked = state.rules.unlimitedSkills;
+      /* 关掉无限火力时，已经装了超过 3 个的格子要**收回到上限**，
+         否则界面上显示 7 个、引擎里只认前 3 个（两边不一致的经典静默故障）。
+         收的时候按装配顺序保留前 N 个，并过一遍互斥整理。 */
+      if (!state.rules.unlimitedSkills) {
+        for (let t = 0; t < state.teamCount; t++) {
+          for (let i = 0; i < state.teamSizes[t]; i++) {
+            if (state.loadouts[t][i] == null) continue;
+            state.loadouts[t][i] = resolveLoadout(state.loadouts[t][i]).slice(0, MAX_SKILLS_PER_UNIT);
+          }
+        }
+      }
+      save(); drawSkillRules(); drawTeams(); drawSummary();
+    };
+    rs.onchange = (e) => {
+      state.rules.randomSkills = checkedOf(rs, e);
+      rs.checked = state.rules.randomSkills;
+      /* 随机技能开着时不再展开装配面板，收起它以免留下一个半开的面板 */
+      if (state.rules.randomSkills) openSkillRow = null;
+      save(); drawSkillRules(); drawTeams(); drawSummary();
+    };
+  }
 
   /* ---------- 场地大小 ----------
      按比例缩放整个场地。碰撞频率与场地面积成反比，
@@ -290,6 +412,13 @@ export function renderPrepare(root, onStart) {
      全带上既难平衡也没有取舍，所以做成"每局挑几个带"。 */
   let openSkillRow = null;          // 记着哪一行展开了装配面板（同时只开一个）
 
+  /** 当前的装配上限：无限火力 = 不限制（用 Infinity 表示），否则 3。
+   *  集中成一处，是为了"界面能选几个"和"交给引擎几个"永远同一个数 ——
+   *  两处各算一次就会出现"界面显示装了 7 个、引擎只认 3 个"。 */
+  function skillCap() {
+    return state.rules.unlimitedSkills ? Infinity : MAX_SKILLS_PER_UNIT;
+  }
+
   function skillNamesOf(id) {
     const sk = getSkill(id);
     return sk ? sk.name : id;
@@ -343,18 +472,27 @@ export function renderPrepare(root, onStart) {
     const wrap = document.createElement('div');
     wrap.className = 'unit-block';
 
+    /* 两条技能规则的即时影响：
+       · 随机技能 → 这一格根本不能选，按钮显示"本局随机"并禁用；
+       · 无限火力 → 上限抬成"该球种的全部技能"，不再是 3。 */
+    const random = !!state.rules.randomSkills;
+    const cap = skillCap();
+
     const row = document.createElement('div');
     row.className = 'unit-row';
-    const skillLabel = owned.length === 0
-      ? '无技能'
-      : `技能 ${equipped.length}/${owned.length}`;
+    const skillLabel = random
+      ? '本局随机'
+      : (owned.length === 0
+        ? '无技能'
+        : `技能 ${equipped.length}/${owned.length}`);
     row.innerHTML = `
       <span class="idx">#${i + 1}</span>
       <select>${SPECIES.map(s =>
         `<option value="${s.id}"${s.id === speciesId ? ' selected' : ''}>${s.name}（HP ${s.hp}）</option>`
       ).join('')}</select>
-      <button class="btn sm skill-btn${equipped.length ? ' has' : ''}"${owned.length ? '' : ' disabled'}
-        title="${owned.length ? '选择这个球装配哪些技能' : '这个球种没有技能'}">${skillLabel}</button>
+      <button class="btn sm skill-btn${equipped.length && !random ? ' has' : ''}"${owned.length && !random ? '' : ' disabled'}
+        title="${random ? '本局为随机技能：开战前用老虎机抽取，配置时不能选'
+          : (owned.length ? '选择这个球装配哪些技能' : '这个球种没有技能')}">${skillLabel}</button>
     `;
     row.querySelector('select').onchange = e => {
       state.species[t][i] = e.target.value;
@@ -365,7 +503,7 @@ export function renderPrepare(root, onStart) {
       save(); drawTeams(); drawSummary();
     };
     const btn = row.querySelector('.skill-btn');
-    if (owned.length) {
+    if (owned.length && !random) {
       btn.onclick = () => {
         openSkillRow = (openSkillRow === key) ? null : key;
         drawTeams();
@@ -373,14 +511,14 @@ export function renderPrepare(root, onStart) {
     }
     wrap.appendChild(row);
 
-    if (openSkillRow === key && owned.length) {
+    if (openSkillRow === key && owned.length && !random) {
       const panel = document.createElement('div');
       panel.className = 'unit-skills';
-      const full = equipped.length >= MAX_SKILLS_PER_UNIT;
       panel.innerHTML = `
         <div class="unit-skills-head">
           <b>${sp.name}</b>
-          <span class="hint">装配 ${equipped.length} / ${MAX_SKILLS_PER_UNIT} 个</span>
+          <span class="hint">装配 ${equipped.length} / ${Number.isFinite(cap) ? cap : owned.length} 个${
+            Number.isFinite(cap) ? '' : '（无限火力）'}</span>
           <span class="spacer" style="flex:1"></span>
           <div class="seg sm" data-act="descmode">
             <button data-detail="0"${useDetail ? '' : ' class="on"'}>简要</button>
@@ -397,10 +535,10 @@ export function renderPrepare(root, onStart) {
              ① 已达装配上限；② 与已选的另一个技能互斥（映霞[荣]/[枯]）。
              把理由写在标题里，否则玩家只看到"点不动"，会以为是 bug。 */
           const conflict = conflictsWithChosen(id, equipped);
-          const full = equipped.length >= MAX_SKILLS_PER_UNIT;
+          const full = equipped.length >= cap;
           const locked = !on && (full || conflict);
           const why = conflict ? '与已选技能互斥'
-            : (locked ? `最多只能装 ${MAX_SKILLS_PER_UNIT} 个` : '');
+            : (locked ? `最多只能装 ${cap} 个` : '');
           return `
             <label class="sk${on ? ' on' : ''}${locked ? ' locked' : ''}"${why ? ` title="${why}"` : ''}>
               <input type="checkbox" data-skill="${id}"${on ? ' checked' : ''}${locked ? ' disabled' : ''}>
@@ -410,8 +548,9 @@ export function renderPrepare(root, onStart) {
               </span>
             </label>`;
         }).join('')}
-        ${owned.length > MAX_SKILLS_PER_UNIT
-          ? `<div class="hint" style="margin-top:6px">该球种共 ${owned.length} 个技能，最多只能带 ${MAX_SKILLS_PER_UNIT} 个。</div>`
+        ${owned.length > cap
+          ? `<div class="hint" style="margin-top:6px">该球种共 ${owned.length} 个技能，最多只能带 ${cap} 个。
+             （想要全带上就打开上面的「无限火力」。）</div>`
           : ''}
       `;
       panel.querySelectorAll('[data-act=descmode] button').forEach(b => {
@@ -423,7 +562,7 @@ export function renderPrepare(root, onStart) {
           const cur = equippedOf(t, i);
           if (cb.checked) {
             if (cur.includes(id)) return;
-            if (cur.length >= MAX_SKILLS_PER_UNIT) { cb.checked = false; return; }  // 双保险
+            if (cur.length >= cap) { cb.checked = false; return; }   // 双保险
             if (conflictsWithChosen(id, cur)) { cb.checked = false; return; }       // 互斥双保险
             state.loadouts[t][i] = resolveLoadout([...cur, id]);
           } else {
@@ -434,7 +573,8 @@ export function renderPrepare(root, onStart) {
       });
       panel.querySelector('[data-act=all]').onclick = () => {
         /* "全部"也要过互斥整理：直接 slice 会把互斥的两个都装上 */
-        state.loadouts[t][i] = resolveLoadout(owned).slice(0, MAX_SKILLS_PER_UNIT);
+        const all = resolveLoadout(owned);
+        state.loadouts[t][i] = Number.isFinite(cap) ? all.slice(0, cap) : all;
         save(); drawTeams(); drawSummary();
       };
       panel.querySelector('[data-act=none]').onclick = () => {
@@ -456,12 +596,27 @@ export function renderPrepare(root, onStart) {
       <label class="chk">
         <input type="checkbox" id="rPlayer" ${r.playerControl ? 'checked' : ''}>
         <span><span class="t">由我操控其中一个小球</span>
-        <span class="d">用 <span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span>
-        或方向键移动；手机上可拖动屏幕。关掉则全部由 AI 自动战斗。</span></span>
+        <span class="d"><span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span>
+        八向移动、鼠标瞄准，主动技能改为按键发动（原来的间隔变成技能冷却）；
+        被动技能（裁光、见晴的变色…）照旧自动触发。关掉则全部由 AI 自动战斗。</span></span>
       </label>
       <div id="playerPick" style="display:${r.playerControl ? 'block' : 'none'};padding:6px 0 8px 26px">
-        <label class="hint" style="display:block;margin-bottom:4px">选择要操控的小球</label>
+        <label class="hint" style="display:block;margin-bottom:4px">选择要操控的小球（默认：蓝色方第一个）</label>
         <select id="playerUnitSel" style="width:100%;padding:5px 8px;border:1px solid var(--line);border-radius:7px"></select>
+        <div id="playerKeyBox" style="margin-top:10px">
+          <label class="hint" style="display:block;margin-bottom:2px">技能按键（按顺序对应这个球的主动技能）</label>
+          <div class="keybind-list" id="keybindList"></div>
+          <div class="btnrow" style="margin-bottom:6px">
+            <button class="btn sm" id="kbAdd" type="button">＋ 添加按键</button>
+            <button class="btn sm" id="kbReset" type="button">恢复默认</button>
+          </div>
+          <div class="hint keybind-map" id="keybindMap"></div>
+          <div class="hint" style="margin-top:4px">
+            点一个键位再按新键即可改（鼠标左键 / 右键也能绑）。默认：
+            <span class="kbd">鼠标左键</span><span class="kbd">鼠标右键</span>
+            <span class="kbd">E</span><span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span>。
+          </div>
+        </div>
       </div>
 
       <label class="chk">
@@ -585,8 +740,127 @@ export function renderPrepare(root, onStart) {
       sel.innerHTML = list.map(u =>
         `<option value="${u.slot}"${u.slot === state.playerUnit ? ' selected' : ''}>${u.label}</option>`
       ).join('');
-      sel.onchange = () => { state.playerUnit = Number(sel.value); save(); };
+      sel.onchange = () => { state.playerUnit = Number(sel.value); save(); drawKeybinds(); };
     }
+    drawKeybinds();
+  }
+
+  /* ---------- 玩家操控的「自定义按键」 ----------
+     键位表存在 prefs.js 里（跨界面共享 + 持久化），下标 = 第几个主动技能。
+     "哪些技能要用按键"由 skills.js 的 manualSkillIds 一口定死，
+     这里只负责把它翻成界面文字 —— 两边不能各定一套（否则界面写着 3 个键、
+     引擎却要 4 个，作者按下去就会觉得"有个技能放不出来"）。 */
+  bindKbCapture();
+  function currentPlayerUnit() {
+    const list = ballList();
+    const idx = list.findIndex((_, i) => unitSlotOf(i) === state.playerUnit);
+    const at = idx < 0 ? 0 : idx;
+    const t = at < 0 ? 0 : teamIndexOf(at);
+    const i = indexInTeam(at);
+    const speciesId = state.species[t] && state.species[t][i] ? state.species[t][i] : DEFAULT_SPECIES_ID;
+    /* ⚠ 参数顺序是 (speciesId, wanted, maxSkills) —— 写反了会"看不出报错但一个技能都没有" */
+    const skills = normalizeSkills(
+      speciesId, (state.loadouts[t] && state.loadouts[t][i]) || defaultSkillsFor(speciesId));
+    return { speciesId, skills };
+  }
+  /** 全场的第 at 个球属于哪个 slot（与 buildUnitList / makeConfig 同一套编号） */
+  function unitSlotOf(at) {
+    let base = 0, k = 0;
+    for (let t = 0; t < state.teamCount; t++) {
+      for (let i = 0; i < state.teamSizes[t]; i++, k++) {
+        if (k === at) return base + i;
+      }
+      base += 100;
+    }
+    return 0;
+  }
+  function teamIndexOf(at) {
+    let k = 0;
+    for (let t = 0; t < state.teamCount; t++) {
+      for (let i = 0; i < state.teamSizes[t]; i++, k++) if (k === at) return t;
+    }
+    return 0;
+  }
+  function indexInTeam(at) {
+    let k = 0;
+    for (let t = 0; t < state.teamCount; t++) {
+      for (let i = 0; i < state.teamSizes[t]; i++, k++) if (k === at) return i;
+    }
+    return 0;
+  }
+
+  /** 正在等待"按下新键"的那个键位下标（存在模块级的 kbCapture 里） */
+  const capturing = () => kbCapture.at;
+
+  function drawKeybinds() {
+    const host = rulesHost.querySelector('#keybindList');
+    if (!host) return;
+    const keys = getPlayerKeys();
+    const pu = currentPlayerUnit();
+    const manual = manualSkillIds(pu);
+    const bound = Math.max(keys.length, manual.length);
+    const cap = capturing();
+
+    host.innerHTML = Array.from({ length: bound }, (_, i) => `
+      <span class="keybind-row">
+        <button class="btn sm kb-key${cap === i ? ' capturing' : ''}" data-kb="${i}" type="button">
+          ${cap === i ? '按下新键…' : keyLabel(keys[i])}
+        </button>
+        ${bound > 1 ? `<button class="kb-del" data-kbdel="${i}" type="button" title="删掉这个键位">×</button>` : ''}
+      </span>`).join('');
+
+    const map = rulesHost.querySelector('#keybindMap');
+    if (map) {
+      if (!manual.length) {
+        map.innerHTML = `<span class="kb-slot">这个球没有主动技能 —— 所有技能都是被动/形态类，全自动触发，不需要按键。</span>`;
+      } else {
+        map.innerHTML = manual.map((id, i) => {
+          const sk = getSkill(id);
+          const label = keys[i] ? `<span class="kbd">${keyLabel(keys[i])}</span>` : '<span class="kb-none">未绑定</span>';
+          return `${label} → ${sk ? sk.name : id}`;
+        }).join('　·　')
+          + (manual.length > keys.length
+            ? `<br><span class="kb-none">有 ${manual.length - keys.length} 个主动技能没有按键 —— 点「＋ 添加按键」补上。</span>`
+            : '');
+      }
+    }
+
+    /* 捕捉的落点交给模块级的监听（见 kbHandle）：它把"按下的键 + 哪个键位"传回来 */
+    kbCapture.host = host;
+    kbCapture.apply = (code, at) => {
+      if (code && at != null) {
+        const list = getPlayerKeys();
+        while (list.length <= at) list.push('');
+        list[at] = code;
+        setPlayerKeys(list);
+      }
+      drawKeybinds();     // code = null（按了 Esc）时只是把界面恢复成"未在捕捉"
+    };
+
+    host.querySelectorAll('[data-kb]').forEach(btn => {
+      btn.onclick = () => { kbCapture.at = Number(btn.dataset.kb); drawKeybinds(); };
+    });
+    host.querySelectorAll('[data-kbdel]').forEach(btn => {
+      btn.onclick = () => {
+        const i = Number(btn.dataset.kbdel);
+        setPlayerKeys(getPlayerKeys().filter((_, k) => k !== i));
+        kbCapture.at = null;
+        drawKeybinds();
+      };
+    });
+    const add = rulesHost.querySelector('#kbAdd');
+    if (add) add.onclick = () => {
+      const cur = getPlayerKeys();
+      if (cur.length >= MAX_PLAYER_KEYS) return;
+      setPlayerKeys([...cur, '']);
+      drawKeybinds();
+    };
+    const reset = rulesHost.querySelector('#kbReset');
+    if (reset) reset.onclick = () => {
+      setPlayerKeys(DEFAULT_PLAYER_KEYS.slice());
+      kbCapture.at = null;
+      drawKeybinds();
+    };
   }
 
   /** 列出所有将参战的小球（用于"选择我操控哪个"） */
@@ -802,6 +1076,14 @@ export function renderPrepare(root, onStart) {
         if (n) unitWithSkills++;
       }
     }
+    const random = !!state.rules.randomSkills;
+    const un = !!state.rules.unlimitedSkills;
+    /* 随机技能时上面的统计没有意义（开战前才知道抽到什么），
+       所以那一行改说规则本身，避免显示一个"看起来是配置结果"的假数字。 */
+    const skillLine = random
+      ? `<div>技能：<b>随机抽取</b>（开战前老虎机决定，抽完才开打）</div>`
+      : `<div>技能：<b>${skillCount}</b> 个装配在 <b>${unitWithSkills}</b> 个小球上
+        （每个最多 ${un ? '不限（无限火力）' : MAX_SKILLS_PER_UNIT} 个）</div>`;
     root.querySelector('#prepSummary').innerHTML = `
       <div>对阵：<b>${state.teamCount} 方</b> · 共 <b>${total}</b> 个小球</div>
       <div>场地：<b>${a.name}</b> · 大小 <b>${Math.round(state.sizeScale * 100)}%</b>
@@ -810,8 +1092,7 @@ export function renderPrepare(root, onStart) {
       <div>操控：<b>${state.rules.playerControl ? '玩家操控 1 个' : '全自动'}</b>
         · 复活：<b>${state.rules.respawn ? '开' : '关'}</b>
         · 时限：<b>${state.rules.timeLimit ? state.rules.timeLimit + ' 秒' : '不限'}</b></div>
-      <div>技能：<b>${skillCount}</b> 个装配在 <b>${unitWithSkills}</b> 个小球上
-        （每个最多 ${MAX_SKILLS_PER_UNIT} 个）</div>
+      ${skillLine}
     `;
   }
 
@@ -825,8 +1106,9 @@ export function renderPrepare(root, onStart) {
         units.push({
           slot: slotBase + i,
           /* 直接把 raw 值传下去：null 会被 makeUnitStats → normalizeSkills 解析成默认装配。
-         不要在这里传 equippedOf(t,i) —— 那会把默认又固化进战斗配置。 */
-      stats: makeUnitStats(state.species[t][i], state.loadouts[t][i])
+         不要在这里传 equippedOf(t,i) —— 那会把默认又固化进战斗配置。
+         maxSkills 用同一个 skillCap()：界面能选几个，这里就必须能收几个。 */
+      stats: makeUnitStats(state.species[t][i], state.loadouts[t][i], { maxSkills: skillCap() })
         });
       }
       teams.push({ units });
@@ -849,6 +1131,8 @@ export function renderPrepare(root, onStart) {
 
   /* ---------- 刷新 ---------- */
   function refreshAll() {
+    drawDetailToggle();
+    drawSkillRules();
     drawTeamCount();
     drawArenas();
     drawSizeControl();

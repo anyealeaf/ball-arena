@@ -7,7 +7,7 @@
      3. 逻辑与渲染分离：引擎只产出「快照 + 事件流」，不碰 canvas。
    ============================================================ */
 
-import { SCALE, DT, WORLD_W, WORLD_H } from './balls.js';
+import { SCALE, DT, WORLD_W, WORLD_H, SPECIES_BY_ID, RANDOM_SKILL_COUNT } from './balls.js';
 import { effectiveShape, pointInZone, arenaCenter, scaleArena } from './arenas.js';
 import { getSkill, SKILL_PARAMS, CHARGE_FRAMES, DASH_FRAMES, resolveLoadout } from './skills.js';
 
@@ -15,7 +15,7 @@ const TWO_PI = Math.PI * 2;
 
 /* 快照步长：渲染层按这两个常数解析快照，不要再写死数字。
    改动这里就等于改动快照格式，所有读取方（render.js / ui-battle.js / 测试）会一起跟上。 */
-export const SNAP_STRIDE = 16;
+export const SNAP_STRIDE = 19;
 /* 弹道步长：
      0 x  1 y  2 r  3 剩余寿命比例 1~0  4 颜色下标  5 kind(0 特效 / 1 实体 / 2 光束)
      6 宽度  7 方向 x  8 方向 y  9 贴图下标(-1 = 无)  10 光束长度
@@ -48,6 +48,12 @@ export const MIN_SPEED = 20;
 /* 陀螺每层带来的每秒旋转弧度。10 层 ≈ 每秒 1.9 圈。
    转速由层数驱动，所以"叠得越多转得越疯"是看得见的。 */
 export const SPIN_RATE_PER_STACK = 1.2;
+
+/* ---------- 玩家操控 ---------- */
+/** 玩家按住方向键后，多少秒把速度拉到"朝该方向、大小为球速"。
+ *  也用于松开按键后的减速 —— 作者的口径是"松开很快停下"。
+ *  0.13 秒 ≈ 8 帧：跟手，但被撞飞的那一瞬仍然看得见。 */
+export const PLAYER_TURN_SECONDS = 0.13;
 
 /* ------------------------------------------------------------
    定点正弦查表
@@ -230,8 +236,36 @@ function restoreSpeed(u, targetSpeed) {
   u.vy = Math.round(u.vy * k);
 }
 
-/** 两球是否重叠 */
+/** 没在拉弓时该报哪个"美术编号"（快照第 15 位 castKind）。
+ *
+ *  为什么不能直接归 0：0 在 balls.js 的 `bow.kindArt` 表里是「映霞[荣]」，
+ *  而只装「映霞[枯]」的桃夭报告 0 就会举着荣那把粉弓 ——
+ *  只有拉弓那 2 秒才变回花枝弓（实测就是这么错的，画面上一闪一闪地换武器）。
+ *
+ *  所以平时也问一遍技能：`castKind()` 的含义就是"当前该用哪套美术"，
+ *  技能内部自己看着射击计数决定（荣用它区分五连发）。
+ *  取到五连发那一式也无妨：渲染层只在 castP 落在 (0,1) 时才画扇形，
+ *  这时 castP = 0，只会用那一套的 idle 图。
+ *  多个技能同时声明时取最后一个 —— 弓类技能互斥（`group: 'yingxia'`），
+ *  实际只会有一个。 */
+function idleCastKind(u) {
+  /* 手里没东西（没弓）的单位根本用不到这个值 —— 渲染层只在 `u.bow` 存在时读它。
+     不加这道门，每帧都要为一个没人看的字段遍历一遍技能表。 */
+  if (!u.bow) return 0;
+  let k = 0;
+  for (const id of u.skills || []) {
+    const sk = getSkill(id);
+    if (sk && typeof sk.castKind === 'function') k = sk.castKind(u) | 0;
+  }
+  return k;
+}
+
+/** 两球是否重叠。
+ *  **穿透中（起飞）的球不与任何小球"重叠"** —— 这一条同时管住三件事：
+ *  碰撞冲量、位置分离、以及配对里的碰撞伤害，因为它们都先问这一句。
+ *  所以"只与墙壁发生碰撞"只要一个开关，不用在三个地方各写一遍。 */
 function overlapping(A, B) {
+  if (A.phasingFrames > 0 || B.phasingFrames > 0) return false;
   const dx = B.x - A.x, dy = B.y - A.y;
   const rr = A.r + B.r;
   return dx * dx + dy * dy < rr * rr;
@@ -240,6 +274,38 @@ function overlapping(A, B) {
 /* ------------------------------------------------------------
    造球：初始站位
    ------------------------------------------------------------ */
+/** 「随机技能」：从**这个球种自己的**技能池里随机抽 count 个，过一遍互斥整理。
+ *
+ *  为什么用传入的 rnd（本局种子流）而不是 Math.random：
+ *  本项目的立身之本是"同一条种子必然得到同一场战斗"。抽技能如果用了
+ *  真随机，同种子重跑就会抽到不同的技能，回放、截图复现、诊断全部失效。
+ *
+ *  抽法是"逐个从剩余候选里抽"而不是"先洗牌再切前 n 个" ——
+ *  两者消耗的随机数个数不同，但对种子依然是一一对应的。
+ *
+ *  **互斥组在抽的时候就避开**：抽到「公主传承1」之后就把同组其它两个
+ *  从候选里剔掉。如果先抽 3 个再交给 resolveLoadout 整理，
+ *  会出现"老虎机转出 3 个、实际只有 2 个生效"的情况 —— 看着像吞了一个。
+ *  所以实际抽到的个数 = min(count, 该球种的互斥组数)。 */
+function drawRandomSkills(speciesId, rnd, count = RANDOM_SKILL_COUNT) {
+  const pool = ((SPECIES_BY_ID[speciesId] || {}).skills) || [];
+  if (!pool.length) return [];
+  const rest = pool.slice();
+  const usedGroups = new Set();
+  const out = [];
+  const n = Math.min(count, pool.length);
+  while (out.length < n && rest.length) {
+    const j = Math.floor(rnd() * rest.length) % rest.length;
+    const id = rest.splice(j, 1)[0];
+    const sk = getSkill(id);
+    const g = (sk && sk.group) || null;
+    if (g && usedGroups.has(g)) continue;    // 同组已经抽过了，换下一个
+    if (g) usedGroups.add(g);
+    out.push(id);
+  }
+  return out;
+}
+
 function buildUnits(config, rnd) {
   const { teams, arena } = config;
   const shape = arena.shape;
@@ -347,8 +413,14 @@ function buildUnits(config, rnd) {
         hp: st.maxHp,
         r: Math.round(st.r * SCALE),
         /* 质量按面积计（半径平方）。两球对撞时质量决定各自被弹开的程度，
-           所以大球撞小球会把小球弹得更远，符合直觉。 */
-        mass: Math.max(1, Math.round(st.r * st.r)),
+           所以大球撞小球会把小球弹得更远，符合直觉。
+           **木桩（immovable）例外：质量取一个极大的有限值** ——
+           invMass ≈ 0 于是碰撞冲量与分离推挤全都转嫁给对方，
+           木桩纹丝不动。为什么不用 Infinity：两个木桩互相重叠时
+           `Infinity/Infinity` 会算出 NaN，把位置毁掉；
+           1e9 在定点运算里同样"推不动"，但没有这个坑。 */
+        mass: st.immovable ? 1e9 : Math.max(1, Math.round(st.r * st.r)),
+        immovable: !!st.immovable,
         speed: Math.round(st.speed * SCALE),
         melee: st.melee,
         reach: st.reach,
@@ -373,8 +445,16 @@ function buildUnits(config, rnd) {
         /* 技能列表：过一遍互斥整理。
            引擎是权威口径 —— 即使界面漏了（或存档是手改的），
            互斥的两个技能也不会同时生效，避免"界面显示装了 2 个、
-           实际只有 1 个在跑"这种两边不一致的静默故障。 */
-        skills: resolveLoadout(st.skills),
+           实际只有 1 个在跑"这种两边不一致的静默故障。
+
+           「随机技能」开着时，这里用**本局种子**从该球种自己的池子里抽 ——
+           界面完全不参与（准备界面连技能都不能选），所以抽签只此一处，
+           不存在"界面显示的和引擎跑的不一样"。 */
+        skills: resolveLoadout(
+          config.rules && config.rules.randomSkills
+            ? drawRandomSkills(st.speciesId, rnd)
+            : st.skills
+        ),
         skillCd: {},           // 各技能的剩余冷却
         hitsTaken: 0, hitsDealt: 0,  // 撞击次数统计（供"次数触发"类技能使用）
         hpBelowFired: {},      // 血量触发类技能的去重标记
@@ -411,6 +491,15 @@ function buildUnits(config, rnd) {
            与 speedSlow 的区别：那个是加法减益（-20），这个是整体打对折。
            两套分开记，互不覆盖 —— 和上面三种修正是同一个道理。 */
         speedMul: 1,
+        /* 乘子的时限（见晴⑥的羽毛：移速减半 3 秒）。到期由引擎自己还原成 1 ——
+           不能指望"施加减益的那个人"去收尾：她可能已经阵亡，
+           目标就会被永久打对折（吸附那个坑就是"谁负责收尾"没定清楚）。 */
+        speedMulFrames: 0,
+        /* ---------- 「受到的伤害」倍率（见晴④起飞：所有伤害减半）----------
+           和 speedMul 同一套写法：乘子 + 帧数时限，到期由**引擎**还原成 1。
+           作者这一轮把起飞从"免疫"改成了"减半"，所以用的不是那个免疫开关。 */
+        dmgTakeMul: 1,
+        dmgTakeMulFrames: 0,
         bloomed: false,        // 是否已"开华"（形态强化）
         /* 陀螺：被"真正的打击"时叠层，层数同时驱动回血、碰撞伤害、移速与旋转 */
         spinStacks: 0,
@@ -426,6 +515,29 @@ function buildUnits(config, rnd) {
         /* 沉默剩余帧数：不能发动技能，**但撞墙触发的技能照常**
            （作者原文："除碰撞墙体使用的技能以外"）。 */
         silencedFrames: 0,
+        /* ---------- 见晴（白水仙）用到的三项状态 ----------
+           都是"每帧状态"，所以和 stealthFrames 一样按帧倒计。 */
+        /* 无敌剩余帧数（起飞）：除**帧伤/持续伤害**外一概免伤。
+           与 stealthFrames / meleeImmuneFrames 分开 —— 那两条各只挡一部分，
+           这条是"飞在天上打不到"。 */
+        invulnFrames: 0,
+        /* 穿透剩余帧数（起飞）：不与任何小球发生碰撞（不弹、不推、不撞伤），
+           但仍然和墙壁碰撞。碰撞与配对伤害都只看这一个开关。 */
+        phasingFrames: 0,
+        /* 不能发动攻击的剩余帧数（起飞）：引擎会跳过**冷却类技能**与 onThink，
+           但被动、受伤钩子、血量/次数阈值技能照常 —— 作者的原话是
+           "不会发动其他技能的攻击（技能①中的防御效果依然可以触发）"。 */
+        noAttackFrames: 0,
+        /* 水镜颜色（见晴的形态）：0 无 / 1 淡绿 / 2 淡粉 / 3 深蓝紫 / 4 白 / 5 猩红。
+           进快照（第 16 位）—— 它每几秒随机切一次，属于"每帧状态"。 */
+        ringKind: 0,
+        /* 长剑长度（世界单位，0 = 没握剑）。渲染层直接读它画剑，
+           精灵变身（⑤）会让它跟着体型一起减半 —— 改一处就够了。 */
+        swordLen: 0,
+        /* 被"羽毛"打出来的减益：见晴的技能⑥给**对方**挂上。
+           penalty 是"它造成的伤害 -N"（帧伤不减，见 _damage）。 */
+        meleePenalty: 0,
+        skillPenalty: 0,
         /* 吸附：{ targetId, untilFrame } —— 由技能写入，引擎负责把位置按在目标身上 */
         latch: null,
         damageMul: st.damageMul ?? 1,   // 伤害倍率（析光分身 = 1/3）
@@ -440,6 +552,15 @@ function buildUnits(config, rnd) {
         aimAngle: 0,           // 瞄准角（角度制），朝最近的敌人
         hasWindup: false,      // 装了带 windup 的技能 → 每帧要算 castP
         needsAim: false,       // 装了瞄准类技能 → 每帧要算 aimAngle
+        /* 借来的技能（缇娜的蝙蝠"偷学"持续发动型能力）：
+           id → { id, untilFrame, fns }。默认 null = 没借任何东西，
+           普通球一个字段都不多花。见 grantSkill / revokeSkill。 */
+        borrow: null,
+        /* 转向限速（见晴④起飞：空中每秒最多转 45°）。0 = 不限速。 */
+        turnCapDegPerSec: 0,
+        /* 撞墙后朝最近的敌人（起飞用；见 _deflectTowardEnemy 那一节） */
+        wallHoming: false,
+        _capHead: null,
       });
     });
   });
@@ -450,6 +571,8 @@ function buildUnits(config, rnd) {
     if (config.playerSlot !== null && config.playerSlot !== undefined) {
       target = units.find(u => u.slot === config.playerSlot) || null;
     }
+    /* 默认操控**蓝色方（0 号队）的第一个小球** —— 作者 2026-10 的口径。
+       playerSlot 为空（界面没选）时就落在这里。 */
     target = target || units[0];
     target.isPlayer = true;
     config.playerUnitId = target.id;
@@ -488,8 +611,16 @@ function buildUnits(config, rnd) {
     const nx = Math.cos(ang);
     const ny = Math.sin(ang);
     u.spawnAngle = ((ang * 180) / Math.PI + 360) % 360;
-    u.vx = Math.round(nx * spd);
-    u.vy = Math.round(ny * spd);
+    /* 玩家操控的小球**开局不受冲量**（作者 2026-10）：
+       站在出生点上等玩家推。随机角照算（rnd 序列不变，
+       否则"同一配置同一结果"会被这个改动带偏）。 */
+    if (u.isPlayer) {
+      u.vx = 0;
+      u.vy = 0;
+    } else {
+      u.vx = Math.round(nx * spd);
+      u.vy = Math.round(ny * spd);
+    }
   });
 
   /* ---------- 开局站位后处理：把残留重叠解开 ----------
@@ -545,6 +676,13 @@ export class Battle {
 
     this.units = buildUnits({ ...config, arena: this.arena }, this.rnd);
     this.n = this.units.length;
+    /* 玩家操控的小球下标（没开玩家操控就是 -1）。
+       界面靠它找"要画准星、要显示技能按键栏"的那个单位 ——
+       不能再让界面自己去猜 slot（引擎才是权威口径）。 */
+    const pu = this.units.find(u => u.isPlayer);
+    this.playerIdx = pu ? pu.id : -1;
+    /* 本帧的操控意图（玩家操控时由 step 写入，见 step 的注释） */
+    this.input = null;
 
     this.frame = 0;
     this.time = 0;
@@ -557,6 +695,21 @@ export class Battle {
     this.events = [];
     this.zoneAccum = new Map();  // 区域持续伤害的余数累积，保证每秒伤害准确
     this.pairCd = new Map();     // 成对碰撞冷却
+
+    /* 「随机技能」抽签结果记一条事件。
+       为什么要有：抽签结果写在 unit.skills 里，界面能读，但那只是"当前状态"；
+       而战报是**按帧回放**的 —— 拖进度条回到 0 秒时也要能看到"这局抽到了什么"。
+       同时它也让"界面显示的"和"引擎用的"有了一处可对照的权威记录。
+       这里只遍历**开局就在场**的单位：分身是 step() 中途才 push 进 units 的，
+       此刻还不存在，所以天然不会被记进来。 */
+    if (config.rules && config.rules.randomSkills) {
+      for (const u of this.units) {
+        this.events.push({
+          f: 0, type: 'skillDraw', a: u.id, b: -1, value: u.skills.length,
+          skills: u.skills.map(id => (getSkill(id) || {}).name || id)
+        });
+      }
+    }
     this.pairKeyBase = this.n * 1000;
 
     this.maxFrames = Math.round(300 / DT); // 安全上限：最多模拟 5 分钟
@@ -621,6 +774,13 @@ export class Battle {
        （否则渲染层第一帧会画出一个还没变身的球）。 */
     for (const u of this.units) this._initUnitSkills(u);
 
+    /* 第一帧的快照也要带对 castKind（美术编号）——
+       构造函数末尾就会 _record() 一次，而那时候还没跑过 step()，
+       castKind 还是建球时的 0。归 0 会让渲染层把第一帧画成"荣"那把弓，
+       只装「映霞[枯]」的桃夭就在开战瞬间闪一下粉弓（实测就是这么发现的：
+       362 帧里恰好第 1 帧是 0）。 */
+    for (const u of this.units) u.castKind = idleCastKind(u);
+
     this._record();
   }
 
@@ -636,20 +796,99 @@ export class Battle {
     u.needsAim = false;
     for (const id of u.skills || []) {
       const sk = getSkill(id);
-      if (!sk) continue;
-      if (sk.windup > 0) u.hasWindup = true;
-      if (sk.aims) u.needsAim = true;
-      if (typeof sk.passive === 'function') sk.passive(this, u);
-      if (sk.hooks) {
-        for (const name in sk.hooks) {
-          if (!u.hooks[name]) u.hooks[name] = [];
-          u.hooks[name].push(sk.hooks[name]);
-        }
-      }
+      if (sk) this._attachSkill(u, sk);
     }
     /* 没装瞄准类技能（映霞）就不拿弓 —— 一个只带春景/陀螺的桃夭
        不该举着一张弓。放在这里判：引擎是权威口径，渲染层只读结论。 */
     if (!u.needsAim) u.bow = null;
+  }
+
+  /** 把一个技能"挂"到单位身上：跑被动 + 登记钩子。
+   *  抽出来是因为**借来的技能**（缇娜蝙蝠偷学）要走同一条路 ——
+   *  否则就会出现"偷来了却只有一半效果"这种很难查的偏差。 */
+  _attachSkill(u, sk) {
+    if (sk.windup > 0) u.hasWindup = true;
+    if (sk.aims) u.needsAim = true;
+    if (typeof sk.passive === 'function') sk.passive(this, u);
+    if (sk.hooks) {
+      for (const name in sk.hooks) {
+        if (!u.hooks[name]) u.hooks[name] = [];
+        u.hooks[name].push(sk.hooks[name]);
+      }
+    }
+  }
+
+  /** 单位此刻"能用"的所有技能 id：本体的 + 借来的。
+   *  技能分发 / 动作动画都走它 —— 借来的技能要能真的放出去。 */
+  _skillIdsOf(u) {
+    const own = u.skills || [];
+    if (!u.borrow) return own;
+    const out = own.slice();
+    for (const id in u.borrow) if (!out.includes(id)) out.push(id);
+    return out;
+  }
+
+  /* ---------- 借来的技能（缇娜的蝙蝠"偷学"持续发动型能力） ----------
+     作者 2026-10 报的 bug：缇娜偷到见晴的变色能力时"发动了但没有任何效果"。
+     原因：那类能力的 run() 只负责**切一次颜色**，真正的效果全在它自己的
+     被动 + 每帧钩子里（回血 / 护盾 / 长剑 / 发射），而缇娜身上没有那些钩子。
+     所以引擎这里提供"临时装备一个技能 N 秒"：
+       · 与本体技能走同一套装载（_attachSkill）；
+       · 期间它的冷却、钩子、被动都照常跑（_skillIdsOf 让分发看得见它）；
+       · 到期由**引擎**摘钩子并调技能自己的 onUnborrow 收尾 ——
+         不能让借出方负责收尾，它可能已经死了（和限时移速倍率同一个道理）。 */
+  grantSkill(unit, skillId, seconds) {
+    const sk = getSkill(skillId);
+    if (!sk || !unit || !unit.alive) return false;
+    const untilFrame = this.frame + Math.max(1, Math.round(seconds / DT));
+    unit.borrow = unit.borrow || {};
+    const cur = unit.borrow[skillId];
+    if (cur) {
+      /* 已经在借：只续时长，**不重跑被动**（重跑会把加成叠两层） */
+      cur.untilFrame = Math.max(cur.untilFrame, untilFrame);
+      this._emit('borrow', unit, null, seconds, { skill: sk.name, refresh: true });
+      return true;
+    }
+    const rec = { id: skillId, untilFrame, fns: [] };
+    /* 先登记再装载：passive 里如果抛异常，至少引擎知道"挂过它" */
+    unit.borrow[skillId] = rec;
+    /* prepareBorrow 在**被动之前**跑：被动会真改单位的属性（体型、伤害倍率…），
+       技能想"原样还回去"就只能趁那时候先记一份（见晴⑤ 就是这么做的）。 */
+    try {
+      if (typeof sk.prepareBorrow === 'function') sk.prepareBorrow(this, unit);
+    } catch (e) {
+      this._emit('stealFail', unit, null, 0, { skill: sk.name, err: String(e && e.message) });
+    }
+    if (sk.hooks) for (const name in sk.hooks) rec.fns.push([name, sk.hooks[name]]);
+    this._attachSkill(unit, sk);
+    try {
+      if (typeof sk.onBorrow === 'function') sk.onBorrow(this, unit);
+    } catch (e) {
+      this._emit('stealFail', unit, null, 0, { skill: sk.name, err: String(e && e.message) });
+    }
+    this._emit('borrow', unit, null, seconds, { skill: sk.name });
+    return true;
+  }
+
+  /** 归还一个借来的技能：摘钩子 → 让技能自己收尾 → 发事件。 */
+  revokeSkill(unit, skillId) {
+    const rec = unit.borrow && unit.borrow[skillId];
+    if (!rec) return false;
+    delete unit.borrow[skillId];
+    for (const [name, fn] of rec.fns) {
+      const arr = unit.hooks && unit.hooks[name];
+      if (!arr) continue;
+      const i = arr.indexOf(fn);
+      if (i >= 0) arr.splice(i, 1);      // 按引用摘，别把本体技能的钩子一起清了
+    }
+    const sk = getSkill(skillId);
+    try {
+      if (sk && typeof sk.onUnborrow === 'function') sk.onUnborrow(this, unit);
+    } catch (e) {
+      this._emit('stealFail', unit, null, 0, { skill: sk ? sk.name : skillId, err: String(e && e.message) });
+    }
+    this._emit('borrowEnd', unit, null, 0, { skill: sk ? sk.name : skillId });
+    return true;
   }
 
   /* ---------- 当前几何 ---------- */
@@ -673,6 +912,11 @@ export class Battle {
       13 施法进度 0~1（"拉弓"这类**射出前**的动作，见下）
       14 瞄准角(角度制，朝最近的敌人)
       15 施法变体(0 普通 / 1 五连发；同一种动作的不同版本)
+      16 水镜颜色 · 防守（0 无 / 1 淡绿 / 2 淡粉）—— 见晴①
+      17 水镜颜色 · 借用（0 无 / 3 深蓝紫 / 4 白）—— 见晴③
+        ①②③ 是**三个各自独立**的技能，各有一套颜色循环，
+         所以必须是两个字段 —— 一个 ringKind 装不下"同时开着两面水镜"。
+      18 状态位：bit0 = 飞行中（起飞）
        旋转角进快照而不是让渲染层自己按时间算 —— 后者在暂停/回放时会对不上，
        和当初"场地物件没进快照"是同一类错误。
 
@@ -715,6 +959,15 @@ export class Battle {
          五连发和单发的**前置动作时长完全一样**，光看 castP 分不出来，
          但画面上要"多排四根箭"，所以必须由引擎额外告诉渲染层。 */
       buf[o + 15] = u.castKind || 0;
+      /* 16 / 17 水镜的两种颜色（见晴①②③）。
+         为什么必须进快照而不是让渲染层自己看字段：它们是每 5 / 9 秒**随机**切的，
+         渲染层不可能猜；而读引擎的实时字段又会让回放/拖进度条画错
+         （渲染层的铁律：画面只来自快照 + 事件流）。
+         为什么要两个：①②③ 是三个独立技能，各有一套颜色循环，可能同时开着。 */
+      buf[o + 16] = u.ringKind || 0;
+      buf[o + 17] = u.auxKind || 0;
+      /* 18 状态位。目前只有 bit0（飞行中）。渲染层靠它做虚化/变大/影子。 */
+      buf[o + 18] = (u.invulnFrames > 0 || u.phasingFrames > 0) ? 1 : 0;
     }
 
     // 弹道：只有存在弹道时才分配，绝大多数帧是 null
@@ -730,9 +983,11 @@ export class Battle {
         proj[o + 2] = p.r / SCALE;
         proj[o + 3] = p.maxLife > 0 ? Math.max(0, p.life / p.maxLife) : 1;
         proj[o + 4] = this._projColorIndex(p.color);
-        /* 0 = 特效弹 / 1 = 实体弹 / 2 = 光束（渲染成圆柱体光柱） */
-        /* 0 特效 / 1 实体 / 2 光束（向后画拖影）/ 3 锚定光柱（向前画） */
-        proj[o + 5] = p.beamForward ? 3 : (p.beam ? 2 : (p.kind === 'body' ? 1 : 0));
+        /* 0 特效弹 / 1 实体弹 / 2 光束（渲染成圆柱体光柱） */
+        /* 0 特效 / 1 实体 / 2 光束（向后画拖影）/ 3 锚定光柱（向前画）
+           4 羽毛（见晴⑥：追踪 + 反弹，渲染层画成一根羽毛） */
+        proj[o + 5] = p.feather ? 4
+          : (p.beamForward ? 3 : (p.beam ? 2 : (p.kind === 'body' ? 1 : 0)));
         /* p.w 统一以**世界单位**存放（见 _spawnProjectile），不再除 SCALE */
         proj[o + 6] = p.w;
         const sp = Math.hypot(p.vx, p.vy) || 1;
@@ -782,25 +1037,43 @@ export class Battle {
   /** 弹道贴图 → 调色板下标（同一张图只登记一次）
       与颜色调色板同一个套路：快照里只存一个下标，
       渲染层拿 battle.projSpritePalette[idx] 去取图。
-      为什么不让渲染层自己按 tag 判断：tag 是引擎内部字段，没进快照。 */
-  _projSpriteIndex(src, len) {
+      为什么不让渲染层自己按 tag 判断：tag 是引擎内部字段，没进快照。
+
+      `glow` 是这枚弹道**光效环绕**的颜色（渲染层画在贴图下面）。
+      `pulse` 是"这枚弹道的图与光晕要不要**透明度呼吸**"——
+      作者只让蝙蝠呼吸，其他一律静止，所以这是一个显式的开关而不是全局行为。
+      两者都跟着贴图一起登记：同一张图配不同光晕色 / 不同呼吸时算两条
+      （key 里带着它们），所以以后让同一个贴图在不同技能里表现不同也不用改结构。 */
+  _projSpriteIndex(src, len, glow, pulse, offX, offY) {
     if (!src) return -1;
-    const key = src + '|' + (len || 0);
+    const key = src + '|' + (len || 0) + '|' + (glow || '') + '|' + (pulse ? 1 : 0) + '|' + (offX || 0) + '|' + (offY || 0);
     let i = this.projSpriteKeys.indexOf(key);
     if (i < 0) {
       i = this.projSpriteKeys.length;
       this.projSpriteKeys.push(key);
-      this.projSpritePalette.push({ src, len: len || 0 });
+      this.projSpritePalette.push({
+        src, len: len || 0, glow: glow || null, pulse: !!pulse,
+        /* 贴图相对**判定中心**的偏移（世界单位，弹道局部坐标）*/
+        offX: Number(offX) || 0, offY: Number(offY) || 0
+      });
     }
     return i;
   }
 
-  /* ---------- 单帧推进 ---------- */
+  /* ---------- 单帧推进 ----------
+     input（只有玩家操控时会传）：本帧的操控意图
+       { dx, dy }            移动方向（八向，分量取 -1/0/1，长度无所谓）
+       { aimX, aimY }        鼠标位置（**世界单位**，浮点）→ 弹道初始方向
+       { fire: [技能id…] }   本帧按住的技能键对应的技能（可以按住不放）
+     ------------------------------------------------ */
   step(input) {
     if (this.over) return;
     const { units, rules } = this;
     const shape = this.shape();
     const speedMul = this.arena.effects?.globalSpeedMul ?? 1;
+    /* 玩家意图存一份：技能分发（_runSkills）与瞄准（aimUnit）都要读它，
+       它们拿不到 step 的参数。 */
+    this.input = input || null;
 
     /* --- 1) 冷却与计时 --- */
     this.contactBoost.clear();   // 每帧重建"本帧的接触伤害倍率"
@@ -810,6 +1083,12 @@ export class Battle {
       if (u.stealthFrames > 0) u.stealthFrames--;
       if (u.meleeImmuneFrames > 0) u.meleeImmuneFrames--;
       if (u.silencedFrames > 0) u.silencedFrames--;
+      /* 见晴（起飞）的三项：无敌 / 穿透 / 禁止攻击，同样按帧倒计。
+         注意"起飞结束"的收尾（恢复速度、清 ringKind 之外的状态）由技能自己做 ——
+         引擎只负责倒数，免得两边各清一半（吸附那个坑就是这么来的）。 */
+      if (u.invulnFrames > 0) u.invulnFrames--;
+      if (u.phasingFrames > 0) u.phasingFrames--;
+      if (u.noAttackFrames > 0) u.noAttackFrames--;
       /* 吸附**不在这里清除**。
          踩过：原先这里到期就 u.latch = null，而这一句在计时段（phase 1），
          技能的 onThink 在 phase 2 —— 等技能醒来时 latch 已经没了，
@@ -823,6 +1102,28 @@ export class Battle {
         if (u.speedSlowFrames === 0 && u.speedSlow) {
           u.speedSlow = 0;
           this.refreshSpeed(u);
+        }
+      }
+      /* 限时的"移速倍率"（见晴⑥的羽毛：命中后移速减半 3 秒）。
+         和 speedSlow 分开：那个是**加法**减益，这个是**乘法**（减半），
+         两个同时存在时语义不同，不能挤在一个字段里。到期自己还原成 1。 */
+      if (u.speedMulFrames > 0) {
+        u.speedMulFrames--;
+        if (u.speedMulFrames === 0 && u.speedMul !== 1) {
+          u.speedMul = 1;
+          this.refreshSpeed(u);
+        }
+      }
+      /* 限时的"受到伤害倍率"（见晴④起飞：所有伤害减半）。同一套写法。 */
+      if (u.dmgTakeMulFrames > 0) {
+        u.dmgTakeMulFrames--;
+        if (u.dmgTakeMulFrames === 0 && u.dmgTakeMul !== 1) u.dmgTakeMul = 1;
+      }
+      /* 借来的技能到期（缇娜蝙蝠偷学的"持续发动型"能力）。
+         到点由引擎摘钩子 + 调技能自己的 onUnborrow 收尾。 */
+      if (u.borrow) {
+        for (const id in u.borrow) {
+          if (this.frame >= u.borrow[id].untilFrame) this.revokeSkill(u, id);
         }
       }
 
@@ -849,7 +1150,7 @@ export class Battle {
       if (u.alive) {
         if (u.hasWindup) {
           let best = 0, kind = 0;
-          for (const id of u.skills || []) {
+          for (const id of this._skillIdsOf(u)) {
             const sk = getSkill(id);
             if (!sk || !(sk.windup > 0) || !sk.trigger || sk.trigger.type !== 'cooldown') continue;
             const left = u.skillCd[id] || 0;
@@ -864,14 +1165,26 @@ export class Battle {
             }
           }
           u.castP = best;
-          u.castKind = kind;
+          /* best = 0 表示"这个单位挂着拉弓类技能、但此刻没在拉弓"——
+             这时候 castKind 仍然要报**它用的是哪一式**，不能归 0。
+             归 0 是错的：0 在美术表里是「映霞[荣]」，于是只装「映霞[枯]」的
+             桃夭平时举着荣那把粉弓，只有拉弓那 2 秒才变回花枝弓。 */
+          u.castKind = best > 0 ? kind : idleCastKind(u);
         } else {
           u.castP = 0;
-          u.castKind = 0;
+          u.castKind = idleCastKind(u);
         }
         if (u.needsAim) {
           const t = this._nearestEnemy(u);
-          if (t) {
+          /* 玩家操控时弓跟着**鼠标**转（不然举着一张瞄别人的弓很别扭）；
+             没动过鼠标就照旧朝最近的敌人。 */
+          const inp = this.input;
+          if (u.isPlayer && inp && inp.aimX != null && inp.aimY != null) {
+            const ax = inp.aimX - u.x / SCALE, ay = inp.aimY - u.y / SCALE;
+            if (Math.hypot(ax, ay) > 0.5) {
+              u.aimAngle = ((Math.atan2(ay, ax) * 180) / Math.PI + 360) % 360;
+            }
+          } else if (t) {
             u.aimAngle = ((Math.atan2(t.y - u.y, t.x - u.x) * 180) / Math.PI + 360) % 360;
           }
           /* 没有敌人时**保留上一帧的角度**而不是归零：
@@ -922,23 +1235,48 @@ export class Battle {
         }
       }
 
-      /* 玩家操控：唯一允许主动改变方向的情形。
-         不给"直接覆盖速度"，而是给一个转向加速度，这样仍然是"本体在直着走"，
-         只影响方向，不至于让操控手感变得像开赛车。 */
-      if (u.isPlayer && input && (input.dx || input.dy)) {
-        const mag = Math.hypot(input.dx, input.dy) || 1;
-        const accel = u.speed * 2.6;                 // 转向加速度上限
-        u.vx += Math.round((input.dx / mag) * accel * DT);
-        u.vy += Math.round((input.dy / mag) * accel * DT);
-        this._clampSpeed(u, u.speed * 1.6);          // 防止无限加速
-      }
+      /* ---------- 玩家操控：八向移动 ----------
+         作者 2026-10 的口径：「WASD 操作玩家小球移动，支持八向移动；
+         松开后很快停下」。所以是**直接给速度**（按住 W+D 就朝右上角以球速走），
+         而不是"给一个转向加速度慢慢拐过去"。
+
+         但也不是"硬写速度"：目标是"朝按键方向、大小为球速"的速度，
+         当前速度每帧朝它靠拢，几帧内到齐（PLAYER_TURN_SECONDS ≈ 0.13 秒）。
+         这样保留了两个好处：
+           · 被撞/被击退的那一瞬仍然会发生（不是每一帧都被抹掉）；
+           · 撞墙反弹后的新方向也能被玩家在几帧内掰回来，而不是"贴墙卡住"。
+         松开方向键时同理朝 0 靠拢 —— 观感就是"松手几步内停下"。 */
+      const movePlayer = () => {
+        if (!u.isPlayer || !input) return;
+        const ix = input.dx || 0, iy = input.dy || 0;
+        const im = Math.hypot(ix, iy);
+        const tvx = im > 0 ? Math.round((ix / im) * u.speed) : 0;
+        const tvy = im > 0 ? Math.round((iy / im) * u.speed) : 0;
+        /* 每帧最多改变多少速度：满速 ÷ 靠拢时间 */
+        const maxStep = Math.max(1, Math.round((u.speed / PLAYER_TURN_SECONDS) * DT));
+        const dvx = tvx - u.vx, dvy = tvy - u.vy;
+        const dm = Math.hypot(dvx, dvy);
+        if (dm <= maxStep) {
+          u.vx = tvx; u.vy = tvy;
+        } else {
+          u.vx += Math.round((dvx / dm) * maxStep);
+          u.vy += Math.round((dvy / dm) * maxStep);
+        }
+      };
+
+      /* ⚠ 起飞（见晴④）期间**不发动任何攻击**：作者的口径是
+         "不会发动其他技能的攻击（技能①中的防御效果依然可以触发）"。
+         所以拦的是"冷却类技能 + onThink"这两条**攻击**路径，
+         而被动、onBeforeDamage（护盾）、受伤钩子、onMove、血量/次数阈值技能
+         全部照常 —— 它们才是"防御效果"。 */
+      const noAttack = u.noAttackFrames > 0;
 
       /* 技能钩子：给技能一次修改速度或触发效果的机会 */
-      this._runHooks(u, 'onThink', { input });
+      if (!noAttack) this._runHooks(u, 'onThink', { input });
 
       /* 冷却触发的技能（例如"每 2.5 秒发射一枚弹道"）。
          放在移动之前：发射位置取本帧开始时的位置，更好预测。 */
-      this._runSkills(u, 'cooldown');
+      if (!noAttack) this._runSkills(u, 'cooldown');
 
       /* 血量阈值与次数阈值的技能每帧都要检查一次。
          注意：这两类以前**根本没有分发点**，写了 onHpBelow 的技能永远不会发动
@@ -1013,9 +1351,16 @@ export class Battle {
         dashing = true;
       }
 
+      /* 玩家操控的移动指令：冲刺期间不介入（冲刺的速度与航向由它自己的曲线决定） */
+      if (!dashing) movePlayer();
+
       /* 转向修正 / 阻力 / 区域速度缩放：冲刺期间一律不生效，
          冲刺的航向与速度只由技能自己的衰减曲线决定。 */
       if (!dashing) {
+        /* 转向限速的单位要拿"本帧开始时的航向"当基准（见下方 turnCapDegPerSec），
+           所以必须在**任何**转向发生之前记下来。 */
+        if (u.turnCapDegPerSec > 0 && (u.vx || u.vy)) u._capHead = Math.atan2(u.vy, u.vx);
+
         /* 逐帧微转向：让航向缓慢朝最近的敌人修正。
            速度大小不变，只改方向，因此观感上仍是"直着走"。
            玩家操控时跳过（否则会和玩家的操作打架）。 */
@@ -1046,9 +1391,40 @@ export class Battle {
 
       this._runHooks(u, 'onMove', {});
 
+      /* ---------- 技能型转向限速（单位：度/秒） ----------
+         见晴 ④ 起飞的要求是"移动中每秒最多修正 45°来追踪敌人"。
+         但一帧里会改航向的地方不止一处：引擎的全局微转向（默认 30°/秒）、
+         技能自己的追踪、区域效果……**叠加**着算实测能到 75°/秒，
+         那就不是"最多 45°"了。
+         所以这里做最终裁决：把本帧航向钳在"本帧开始时的航向 ± N×DT 度"之内。
+         · 放在 onMove **之后**，因为技能的追踪是在 onMove 里做的；
+         · 放在积分与撞墙处理**之前**，所以撞墙那个"瞬间指向敌人"不受限
+           （作者要的就是撞墙即锁定，本来就是瞬间的，不该被 45°/秒 拖住）；
+         · 冲刺期间不介入：冲刺的速度与航向只由它自己的衰减曲线决定。 */
+      if (!dashing && u.turnCapDegPerSec > 0 && u._capHead != null) {
+        const spd = Math.hypot(u.vx, u.vy);
+        if (spd > 0) {
+          let d = Math.atan2(u.vy, u.vx) - u._capHead;
+          while (d > Math.PI) d -= 2 * Math.PI;
+          while (d < -Math.PI) d += 2 * Math.PI;
+          const lim = (u.turnCapDegPerSec * DT * Math.PI) / 180;
+          if (Math.abs(d) > lim) {
+            const a = u._capHead + Math.sign(d) * lim;
+            u.vx = Math.round(Math.cos(a) * spd);
+            u.vy = Math.round(Math.sin(a) * spd);
+          }
+        }
+      }
+
       /* 位移：纯粹的匀速直线积分。
          时间停止期间被冻住的球**原地不动** —— 注意是"不积分"而不是"速度清零"：
          速度留着，停止结束后它会沿着原方向继续走，观感才像"暂停"而不是"刹住"。 */
+      /* 木桩：**速度恒为 0**。
+         放在积分之前清，所以它连"被推着一帧"都不会发生。
+         质量极大已经挡住了碰撞冲量；这里再兜住那些会直接改 vx/vy 的东西：
+         击退、冲刺、撞墙反弹、分离时的最小分离速度。
+         （作者的要求就是"速度恒定为 0"，那就别让它有任何例外通道。） */
+      if (u.immovable) { u.vx = 0; u.vy = 0; }
       if (!this._frozenFor(u)) {
         u.x += Math.round(u.vx * DT);
         u.y += Math.round(u.vy * DT);
@@ -1095,9 +1471,16 @@ export class Battle {
         restoreSpeed(u, speedBefore);
 
         /* 撞墙后把航向朝最近的敌人偏转一点（默认最多 10 度）。
-           这既让场面更容易收敛到交战，也省掉了"凭空扩大攻击范围"的假机制。 */
+           这既让场面更容易收敛到交战，也省掉了"凭空扩大攻击范围"的假机制。
+
+           例外：`wallHoming` 的单位（见晴起飞）撞墙后**直接指向最近的敌人**。
+           理由：她飞在天上时"只与墙壁发生碰撞"，如果撞完只是随机反弹，
+           5 秒滞空就白飞了 —— 撞墙即锁定目标，飞行才有意义。
+           速率仍然严格不变（旋转不改变速率）。 */
         const maxDeg = this.rules.wallDeflectDeg ?? 10;
-        const turned = maxDeg > 0 ? this._deflectTowardEnemy(u, maxDeg) : 0;
+        const turned = u.wallHoming
+          ? this._aimAtNearestEnemy(u)
+          : (maxDeg > 0 ? this._deflectTowardEnemy(u, maxDeg) : 0);
 
         this._emit('wall', u, null, 0, { nx: c.nx, ny: c.ny, turned });
 
@@ -1230,7 +1613,9 @@ export class Battle {
 
   /** 按触发类型调用某小球身上的技能。list 为空表示"所有技能都可触发"。 */
   _runSkills(unit, triggerType, extra) {
-    const ids = unit.skills || [];
+    /* 借来的技能也算"此刻能用" —— 否则偷来的持续型能力只会挂上钩子，
+       它自己那套冷却触发（例如见晴①每 5 秒切一次色）永远不会跑。 */
+    const ids = this._skillIdsOf(unit);
     if (!ids.length) return;
     /* 沉默（吸血习性）：被缠住的球发不出技能，
        但**撞墙触发的技能照常** —— 作者原文"除碰撞墙体使用的技能以外"。
@@ -1239,10 +1624,16 @@ export class Battle {
     /* 时间停止：被冻住的球发不出技能（撞墙类也发不出 —— 它压根动不了） */
     if (this._frozenFor(unit)) return;
     const target = this._nearestEnemy(unit);
+    /* 玩家操控：主动技能改成**按键发动**（作者 2026-10）。
+       只有"本帧按住的键"对应的技能才放；标了 auto 的（见晴①变色这类
+       形态 / 防御技）仍然照旧按自己的冷却自动触发。 */
+    const manual = unit.isPlayer && triggerType === 'cooldown';
+    const pressed = manual && this.input && this.input.fire ? this.input.fire : null;
     for (const id of ids) {
       const sk = getSkill(id);
       if (!sk) continue;
       if (sk.trigger.type !== triggerType) continue;
+      if (manual && !sk.auto && !(pressed && pressed.indexOf(id) >= 0)) continue;
       if ((unit.skillCd[id] || 0) > 0) continue;
 
       let fired = false;
@@ -1282,7 +1673,8 @@ export class Battle {
          没给就是 -1，渲染层回退成原来的程序化光点。
          登记成下标而不是把路径塞进快照 —— 快照是每帧的 Float64Array，
          塞字符串会毁掉它的紧凑性。 */
-      spriteIdx: this._projSpriteIndex(p.sprite, p.spriteLen),
+      spriteIdx: this._projSpriteIndex(p.sprite, p.spriteLen, p.spriteGlow, p.spritePulse,
+        p.spriteOffX, p.spriteOffY),
       /* ---------- 追踪（蝙蝠） ----------
          homing: { targetId, turnPerSec } —— 每帧朝目标转，但**每秒最多转这么多度**。
          是"转速上限"不是"总偏角上限"（作者确认过）：
@@ -1331,6 +1723,9 @@ export class Battle {
          开华的 +50 也只加在带"光"的攻击上。 */
       traits: p.traits ? [...p.traits] : [],
       bounces: p.bounces || 0,       // 剩余可弹射次数（撞墙反弹而不是消失）
+      /* 羽毛（见晴⑥）：进快照时占一个独立的 kind，渲染层据此画成羽毛形状，
+         而不是普通的圆形光点。 */
+      feather: !!p.feather,
       hitsLeft: p.hitsLeft ?? 1,     // 还剩几次命中判定（默认一次）
       /* 光束类弹道（激光）：渲染成长条拖影而不是圆点。
          不能靠"宽度/半径"的比值去猜 —— 激光的宽度恰好是半径的 2 倍，
@@ -1380,6 +1775,12 @@ export class Battle {
   /** 从弹道 p 在当前位置分裂出 n 条新弹道（棱镜的光门分裂） */
   _splitProjectile(p, n, spec) {
     const base = Math.atan2(p.vy, p.vx);
+    /* 母弹的贴图要跟着传给碎片。
+       p 身上只存了下标，所以这里回查调色板拿路径（见 _projSpriteIndex）。
+       不传的话碎片会静默变成程序化光点 —— "分裂之后特效突然变了"这类问题
+       在画面上很难归因，所以在源头一次传够。 */
+    const parentSpr = (p.spriteIdx >= 0 && this.projSpritePalette[p.spriteIdx])
+      ? this.projSpritePalette[p.spriteIdx] : null;
     for (let i = 0; i < n; i++) {
       /* 随机方向：用本局种子流，保证同种子完全可复现 */
       const ang = base + (this.rnd() * 2 - 1) * Math.PI;
@@ -1398,7 +1799,13 @@ export class Battle {
         life: spec.life ?? 4,
         color: spec.color,
         traits: spec.traits,
-        bounces: spec.bounces ?? 0
+        bounces: spec.bounces ?? 0,
+        sprite: spec.sprite ?? (parentSpr ? parentSpr.src : null),
+        spriteLen: spec.spriteLen ?? (parentSpr ? parentSpr.len : 0),
+        spriteGlow: spec.spriteGlow ?? (parentSpr ? parentSpr.glow : null),
+        spritePulse: spec.spritePulse ?? (parentSpr ? parentSpr.pulse : false),
+        spriteOffX: spec.spriteOffX ?? (parentSpr ? parentSpr.offX : 0),
+        spriteOffY: spec.spriteOffY ?? (parentSpr ? parentSpr.offY : 0)
       });
     }
   }
@@ -1870,7 +2277,11 @@ export class Battle {
      免得把事件流的 6000 条总上限吃光、导致后面的死亡/开华事件被丢掉。 */
   _tickDamage(from, to, amount, kind, traits) {
     if (!to.alive || amount <= 0) return;
-    this._damage(from, to, amount, kind, { traits, quiet: true, unavoidable: true });
+    /* opts.frame = "这是每帧持续伤害"。
+       它有两处语义（都由 _damage 消费）：
+         · 起飞的无敌**放行**帧伤（作者：buff 类伤害 = 被命中后持续掉血的伤害）；
+         · 「我很可爱」羽毛的"技能伤害 -5"**不作用于**帧伤。 */
+    this._damage(from, to, amount, kind, { traits, quiet: true, unavoidable: true, frame: true });
     if (this.tickEvents < MAX_TICK_EVENTS) {
       this.tickEvents++;
       this._emit('hit', from, to, amount, { kind, tick: true });
@@ -1894,6 +2305,12 @@ export class Battle {
       sticker: stats.sticker || owner.sticker,
       stickerBloom: stats.stickerBloom || null,
       bow: stats.bow || null,
+      /* 领域配置必须跟着一起拷 —— 漏了它，带「辉光领域」的分身
+         会在自己的 passive 里把 battle.auroraStyle 覆盖成 null，
+         整场极光当场消失（看着像领域失效，其实是分身把它关了）。
+         比分身的其它外观字段更隐蔽：贴图/弓漏了只是"长得不一样"，
+         这个漏了会**影响别人的画面**。 */
+      domain: stats.domain || owner.domain || null,
       maxHp: stats.maxHp,
       hp: stats.maxHp,
       r: Math.round((stats.r ?? owner.r / SCALE) * SCALE),
@@ -1918,8 +2335,14 @@ export class Battle {
       dashHits: new Set(), cd: {}, flags: {},
       bloomed: false, dodge: 0, stealthFrames: 0,
       meleeImmuneFrames: 0, silencedFrames: 0, latch: null,
+      invulnFrames: 0, phasingFrames: 0, noAttackFrames: 0,
+      wallHoming: false, turnCapDegPerSec: 0, _capHead: null,
+      /* 借来的技能：id → { id, untilFrame, fns }（缇娜蝙蝠偷学） */
+      borrow: null,
+      ringKind: 0, swordLen: 0, meleePenalty: 0, skillPenalty: 0,
       baseMelee: stats.melee ?? 0, meleeBonus: 0, spinMeleeBonus: 0,
       speedOverride: null, speedBonus: 0, speedSlow: 0, speedSlowFrames: 0, speedMul: 1,
+      speedMulFrames: 0, dmgTakeMul: 1, dmgTakeMulFrames: 0,
       spinStacks: 0, spinAngle: 0, healAcc: 0, healed: 0,
       castP: 0, castKind: 0, aimAngle: 0, hasWindup: false, needsAim: false,
       damageMul: stats.damageMul ?? 1,
@@ -1996,6 +2419,32 @@ export class Battle {
     return this.timeStopUntil > this.frame;
   }
 
+  /* ---------- 视角 / 瞄准 ---------- */
+  /** 技能该朝哪个方向放：返回单位向量 { ux, uy }（浮点，世界尺度）。
+   *
+   *  玩家操控时**由鼠标位置决定**（作者 2026-10：主动技能的弹道初始方向
+   *  由鼠标位置决定）；没动过鼠标、或这个单位不是玩家操控的，就照旧朝目标。
+   *  把这一层放在引擎里而不是各个技能里，是为了让所有弹道（魔弹 / 箭矢 /
+   *  蝙蝠 / 霰弹 / 光炮 / 激光 / 羽毛…）用同一套规则，不会出现
+   *  "这个技能跟鼠标、那个技能跟敌人"的割裂。
+   *
+   *  ⚠ 只影响**方向**：扇形散开、随机抖动、转速上限都还是各技能自己的事。 */
+  aimUnit(unit, target) {
+    const inp = this.input;
+    if (unit.isPlayer && inp && inp.aimX != null && inp.aimY != null) {
+      const dx = inp.aimX - unit.x / SCALE;
+      const dy = inp.aimY - unit.y / SCALE;
+      const d = Math.hypot(dx, dy);
+      /* 鼠标正好压在球心上（d≈0）时给不了方向，退回"朝目标" */
+      if (d > 0.5) return { ux: dx / d, uy: dy / d, byMouse: true };
+    }
+    const tx = target ? target.x : unit.x + 1000;
+    const ty = target ? target.y : unit.y;
+    const dx = tx - unit.x, dy = ty - unit.y;
+    const d = Math.hypot(dx, dy) || 1;
+    return { ux: dx / d, uy: dy / d, byMouse: false };
+  }
+
   /* ---------- 特殊资源 ----------
      与 _heal 对称的原语：技能想加资源就调它，别直接改 u.res。
      理由和 _heal 一样 —— 夹上限、记事件、以及"技能不需要知道 resMax 在哪"。 */
@@ -2006,6 +2455,18 @@ export class Battle {
     const got = unit.res - before;
     if (got > 0) this._emit('resource', unit, null, got, { res: unit.res, reason: reason || '' });
     return got;
+  }
+
+  /** 花掉资源（水镜护盾吸收伤害、或者自然衰减）。
+   *  返回**实际花掉的量** —— 护盾吸收伤害时必须知道这个数才知道还剩多少要打到血上。
+   *  与 _gainResource 对称：技能不直接改 u.res。 */
+  _spendResource(unit, amount, reason) {
+    if (!unit || !(amount > 0) || !(unit.res > 0)) return 0;
+    const before = unit.res;
+    unit.res = Math.max(0, unit.res - amount);
+    const spent = before - unit.res;
+    if (spent > 0) this._emit('resource', unit, null, -spent, { res: unit.res, reason: reason || '' });
+    return spent;
   }
 
   /** 只按倍率缩放、**不加**"光"加成。
@@ -2082,7 +2543,38 @@ export class Battle {
   }
 
 
-  /* ---------- 撞墙时触发技能 ---------- */
+  /** 把航向**精确**改为朝着最近的敌对小球（速率严格不变）。
+   *
+   *  与 `_deflectTowardEnemy` 的区别：那个是"最多转 N 度"，
+   *  这个是"直接把方向指着它"（差多少转多少，最多 180°）。
+   *  用途见 wallHoming：见晴起飞时撞墙 → 立刻朝最近的敌人飞过去。 */
+  _aimAtNearestEnemy(u) {
+    let best = null, bestD2 = Infinity;
+    for (const o of this.units) {
+      if (!o.alive || o.id === u.id) continue;
+      if (o.team === u.team && !this.rules.friendlyFire) continue;
+      const dx = o.x - u.x, dy = o.y - u.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) { bestD2 = d2; best = o; }
+    }
+    if (!best) return 0;
+
+    const curDeg = ((Math.atan2(u.vy, u.vx) * 180) / Math.PI + 360) % 360;
+    const wantDeg = ((Math.atan2(best.y - u.y, best.x - u.x) * 180) / Math.PI + 360) % 360;
+    let diff = wantDeg - curDeg;
+    while (diff > 180) diff -= 360;
+    while (diff < -180) diff += 360;
+
+    const before = Math.hypot(u.vx, u.vy);
+    const r = rotateVel(u.vx, u.vy, diff);
+    u.vx = r.vx;
+    u.vy = r.vy;
+    restoreSpeed(u, before);            // 只改方向，不改速率
+    u.face = ((Math.atan2(u.vy, u.vx) * 180) / Math.PI + 360) % 360;
+    return diff;
+  }
+
+  /** 撞墙时触发技能 */
   _onWallTouch(u, info) {
     /* 冲刺中撞墙：立刻结束冲刺。
        不这么做的话会出大问题：冲刺分支每帧都会把速度重新覆盖成
@@ -2445,6 +2937,8 @@ export class Battle {
 
   /** 碰撞后若速度过小则给一个最小速度，避免小球停在原地 */
   _ensureMoving(u) {
+    /* 木桩静止是**设计**，不是"卡住" */
+    if (u.immovable) return;
     const minSpeed = u.speed * 0.25;
     const cur = Math.hypot(u.vx, u.vy);
     if (cur >= minSpeed) return;
@@ -2584,6 +3078,13 @@ export class Battle {
 
   /** 判定一对小球能否互相攻击并结算伤害 */
   _attackPair(A, B) {
+    /* 穿透中（起飞）**不与小球结算攻击**。
+       作者的口径是"空中只与墙壁发生碰撞"，空中的伤害走专有的每帧帧伤
+       （见 skills.js 的 ④起飞）。
+       这条守卫必须加在这里：`_resolveAttacks` 有自己的网格，**不走** `overlapping`，
+       所以只改 `overlapping` 会漏掉碰撞伤害 —— 实测表现是
+       "飞过去的时候除了 5/帧，还每 0.5 秒多挨一下 30 点的碰撞伤害"。 */
+    if (A.phasingFrames > 0 || B.phasingFrames > 0) return;
     const ddx = B.x - A.x, ddy = B.y - A.y;
     /* 攻击判定范围 = 两球半径 + 6 单位余量。
        常量就是常量：不接受任何"临时加成"，没接触就是没伤害。 */
@@ -2677,6 +3178,30 @@ export class Battle {
        破解器已移除，数值从此和属性表 / 技能表严格一致。 */
     let dmg = amount;
 
+    /* ---------- 完全无敌 invulnFrames ----------
+       作者当年的口径是"免疫除了 buff 类伤害外的一切伤害"，
+       而"buff 类伤害"= **被命中后持续掉血的伤害**（目前游戏里就是
+       裁光/场地那类每帧结算的伤害，即 opts.frame）。
+       所以这里只放行帧伤，其余（碰撞、弹道、光柱、爆炸）一律免疫。
+       注意放在闪避之前：免疫是**确定**的，不该再消耗一次闪避的随机数，
+       否则同一颗种子的闪避序列会被"有没有起飞"这种别的事情带偏。
+
+       ⚠ 见晴 ④ 起飞**已经不用这条了**（作者改成"所有伤害减半"，
+       见下面的 dmgTakeMul）。这里保留为通用引擎能力，目前只有诊断在用。 */
+    if (to.invulnFrames > 0 && !opts.frame) {
+      this._emit('immune', from, to, 0, { kind, amount: dmg });
+      return;
+    }
+
+    /* ---------- 受到的伤害倍率（见晴④起飞：所有伤害减半）----------
+       放在最前面（闪避与护盾之前）：先把伤害打对折，再让闪避判定、
+       护盾吸收、技能钩子依次处理 —— 顺序反过来的话护盾会按"未减半"的量扣，
+       等于白白多吸收一倍。
+       帧伤也吃这个倍率（作者的口径是"受到的所有伤害减半"）。 */
+    if (to.dmgTakeMul != null && to.dmgTakeMul !== 1) {
+      dmg = Math.max(1, Math.round(dmg * to.dmgTakeMul));
+    }
+
     /* 闪避（辉光领域）：10% / 开华后 15%。
        用本局种子流取值，所以同一条种子必然闪避同样的次数，不影响可复现性。 */
     if (!opts.unavoidable && to.dodge > 0 && this.rnd() < to.dodge) {
@@ -2684,9 +3209,28 @@ export class Battle {
       return;
     }
 
+    /* ---------- 「我很可爱」（见晴⑥）的羽毛减益 ----------
+       被羽毛打中的球，**它造成的**碰撞伤害 / 技能伤害各 -5（可叠加）。
+       放在这里（而不是各个技能里各减一次）的原因：伤害的出口只有这一个，
+       一处就能覆盖碰撞、弹道、光柱、爆炸所有来源，不会漏。
+       帧伤（每帧持续掉血）**不减** —— 作者明确排除了帧伤类型。 */
+    if (from && !opts.frame) {
+      const pen = (kind === 'melee' || kind === 'dash')
+        ? (from.meleePenalty || 0)
+        : (from.skillPenalty || 0);
+      if (pen > 0) dmg = Math.max(1, dmg - pen);
+    }
+
     // 技能钩子：允许技能修改伤害（护盾、减伤、增伤）
     const mod = this._runHooks(to, 'onBeforeDamage', { from, amount: dmg, kind }) || {};
-    dmg = Math.max(1, Math.round(mod.amount ?? dmg));
+    /* 钩子**显式**给出 amount 时允许为 0 = "全额挡下"（护盾正好够用的那一帧）；
+       没给 amount 的钩子照旧夹到至少 1 点，避免"减伤把伤害减成 0"这种意外。 */
+    if (mod.amount !== undefined) dmg = Math.max(0, Math.round(mod.amount));
+    else dmg = Math.max(1, Math.round(dmg));
+    if (dmg <= 0) {
+      this._emit('blocked', to, null, 0, { kind });
+      return;
+    }
 
     to.hp -= dmg;
     to.taken += dmg;

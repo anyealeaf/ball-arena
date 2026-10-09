@@ -38,6 +38,29 @@ const MIN_GAP = {
    堆积把帧率拖下去（每个声音要建 2~3 个节点）。 */
 const MAX_VOICES = 8;
 
+/* ---------- 打击感：伤害 → 力度权重 ----------
+   作者 2026-10 的要求：「增强小球攻击命中时候的打击感（伤害越高反馈越强）」。
+   原来是一条线性映射 k = dmg/300，有两个毛病：
+     · 66 的碰撞伤害只拿到 0.22 —— 而这恰恰是整局里响得最多的一声，
+       "最常听到的打击"永远停在最轻的那一档；
+     · 300 以上全被压成 1.0，"200 的技能"和"400 的爆炸"听起来一样重。
+   换成**对数映射**：小伤害就有可观的力度，大伤害才拉满，中间拉开档次。
+   HIT_SOFT 附近是轻碰，HIT_HARD 及以上拉满。
+
+   ⚠ **render.js 的伤害飘字也用这一个权重**（伤害越高字越大）——
+   视听必须成套：若各算各的，"重击"会出现"看起来比听起来轻"的错位。 */
+export const HIT_SOFT = 30;
+export const HIT_HARD = 300;
+/** 低于这个权重就不出低频那一层（它最占发声名额，而轻碰本来就该是轻的） */
+export const HIT_SUB_FLOOR = 0.25;
+
+/** 伤害 → 力度权重（0~1）。对数刻度：30 伤害 ≈ 0.26，66 ≈ 0.49，200 ≈ 0.85，300+ = 1 */
+export function hitWeight(dmg) {
+  const d = Math.max(0, Number(dmg) || 0);
+  if (d >= HIT_HARD) return 1;
+  return clamp(Math.log(1 + d / HIT_SOFT) / Math.log(1 + HIT_HARD / HIT_SOFT), 0, 1);
+}
+
 /* 播放头一次前进超过这么多帧，就认为是在拖动进度条而不是在播放，
    这一段不做声 —— 否则拖动时会瞬间触发成百上千个声音。 */
 const MAX_STEP_FRAMES = 24;
@@ -62,6 +85,7 @@ export class AudioEngine {
     this._active = [];
     this._peakVoices = 0;               // 同时发声数的历史峰值（供诊断核对）
     this._noiseBuf = null;
+    this.comp = null;                   // 总线软限幅（有的环境没有这个节点）
     this._box = null;                   // 缓存的场地范围（用于声场定位）
     this._boxFor = null;
   }
@@ -84,7 +108,22 @@ export class AudioEngine {
         this.ctx = new AC();
         this.master = this.ctx.createGain();
         this.master.gain.value = this.enabled ? this.volume : 0;
-        this.master.connect(this.ctx.destination);
+        /* 总线加一级软限幅：混战时十几下打击叠在一起也不会削顶爆音，
+           而且限幅本身让"重击"听起来更结实（动态是打击感的另一半）。
+           没有这个节点的环境（无头诊断里的伪 ctx）就直接接到输出。 */
+        if (this.ctx.createDynamicsCompressor) {
+          const comp = this.ctx.createDynamicsCompressor();
+          comp.threshold.value = -12;
+          comp.knee.value = 20;
+          comp.ratio.value = 6;
+          comp.attack.value = 0.003;
+          comp.release.value = 0.12;
+          this.master.connect(comp);
+          comp.connect(this.ctx.destination);
+          this.comp = comp;
+        } else {
+          this.master.connect(this.ctx.destination);
+        }
       } catch (e) {
         this.supported = false;
         return false;
@@ -151,13 +190,9 @@ export class AudioEngine {
       /* ---- 打击 ---- */
       case 'hit': {
         if (!this._gate('hit', now, MIN_GAP.hit)) return;
-        /* 伤害越高，音高越低、音量越大 —— 一眼（一耳）能听出轻重 */
-        const dmg = Math.max(1, Number(e.value) || 1);
-        const k = clamp(dmg / 300, 0, 1);
-        const base = e.kind === 'melee' ? 220 : 420;
-        this._tone({ freq: base - k * 90, freq2: base * 0.55, dur: 0.10,
-          type: 'triangle', gain: 0.10 + k * 0.16, pan });
-        this._noise({ dur: 0.05, gain: 0.05 + k * 0.07, lp: 2600, pan });
+        /* 近战（球撞球）用低沉些的撞击音，弹道命中用偏高一点的脆音；
+           轻重完全交给伤害权重，见 hitWeight() */
+        this._impact(hitWeight(e.value), pan, e.kind === 'melee' ? 220 : 420);
         break;
       }
       case 'death': {
@@ -187,8 +222,12 @@ export class AudioEngine {
       }
       case 'projHit': {
         if (!this._gate('projHit', now, MIN_GAP.projHit)) return;
-        this._tone({ freq: 700, freq2: 380, dur: 0.09, type: 'triangle', gain: 0.13, pan });
-        this._noise({ dur: 0.05, gain: 0.06, lp: 3200, pan });
+        /* 弹道命中：爆点也要跟着伤害走（比近战脆、比近战轻，免得盖住那一下打击音） */
+        const w = hitWeight(e.value);
+        this._tone({ freq: 700 - w * 160, freq2: 380 - w * 120, dur: 0.08 + w * 0.06,
+          type: 'triangle', gain: 0.10 + w * 0.10, pan });
+        this._noise({ dur: 0.04 + w * 0.03, gain: 0.05 + w * 0.05,
+          lp: 3200 + w * 1600, hp: 900, pan });
         break;
       }
       case 'projWall':
@@ -316,8 +355,9 @@ export class AudioEngine {
     this._voice(dur + (delay || 0));
   }
 
-  /** 噪声：用来做撞击、爆炸这类"没有音高"的声音 */
-  _noise({ dur = 0.12, gain = 0.12, lp = 3000, pan = 0 }) {
+  /** 噪声：用来做撞击、爆炸这类"没有音高"的声音。
+   *  给了 {@code hp} 就再串一级高通，只留高频那一小段 —— 那是"脆"的打击瞬态。 */
+  _noise({ dur = 0.12, gain = 0.12, lp = 3000, hp = 0, pan = 0 }) {
     const ctx = this.ctx;
     if (!ctx || this._voicesNow() >= MAX_VOICES) return;
     if (!this._noiseBuf) {
@@ -338,14 +378,44 @@ export class AudioEngine {
     const filt = ctx.createBiquadFilter();
     filt.type = 'lowpass';
     filt.frequency.value = lp;
+    /* 可选的高通：低通 + 高通叠起来就是一段带通，打出来是"啪"而不是"噗" */
+    let tail = filt;
+    if (hp > 0) {
+      const hpF = ctx.createBiquadFilter();
+      hpF.type = 'highpass';
+      hpF.frequency.value = hp;
+      filt.connect(hpF);
+      tail = hpF;
+    }
     const g = ctx.createGain();
     g.gain.setValueAtTime(gain, t0);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    src.connect(filt); filt.connect(g);
+    src.connect(filt); tail.connect(g);
     this._connect(g, pan);
     src.start(t0);
     src.stop(t0 + dur + 0.02);
     this._voice(dur);
+  }
+
+  /** 打击音：三层叠出来的"手感" —— 作者要的"打击感"就是这三样凑出来的
+   *    ① 脆 —— 极短的带通噪声，负责"打到了"（没有它听起来像隔着一层布）
+   *    ② 实 —— 带下滑音高的三角波，负责"多轻多重"
+   *    ③ 沉 —— 60~110Hz 的正弦，负责"胸口那一下"
+   *  三层用**同一个权重**放量、放长：伤害越高是整体变强，
+   *  而不是只把音量拧大 —— 只拧音量听起来像"同一拳离麦克风更近了"。
+   *  轻碰不出第三层（见 HIT_SUB_FLOOR）：低频最占发声名额，而轻碰本就该轻。 */
+  _impact(w, pan, base = 300) {
+    const k = clamp(w, 0, 1);
+    this._noise({ dur: 0.018 + k * 0.022, gain: 0.04 + k * 0.06,
+      lp: 5200 + k * 2400, hp: 600, pan });
+    /* 本体音高只滑 45%：滑太多会掉进低频层那一带，两层叠起来就"糊"了 */
+    const f0 = base * (1 - 0.45 * k);
+    this._tone({ freq: f0, freq2: f0 * 0.55,
+      dur: 0.08 + k * 0.14, type: 'triangle', gain: 0.09 + k * 0.13, pan });
+    if (k >= HIT_SUB_FLOOR) {
+      this._tone({ freq: 110 - k * 50, freq2: 55 - k * 12,
+        dur: 0.10 + k * 0.20, type: 'sine', gain: 0.04 + k * 0.16, pan });
+    }
   }
 
   /** 琶音：几个音依次响起，用来做"升级/召唤/结算"这类有情绪的瞬间 */

@@ -193,6 +193,28 @@ export const YUNCAI = {
   modan: {
     cd: 2, dmg: 75, speed: 500, r: 6, life: 4, color: '#c4b5fd',
     hitsToLaser: 2,
+    /* 淡紫魔力球的美术（作者给的图）：亮核在右、尾迹在左的彗星。
+       判定是半径 6 的圆（直径 12）。
+       **spriteLen 由作者定，改过两次：30 → 15（"改成现在的一半左右"）
+       → 20（"魔弹尺寸统一改到 20"）。**
+       20 正好等于第三发光柱的粗细（`laserWidth`），所以魔弹的两种形态
+       在画面上是同一个尺寸感 —— 这也是"统一到 20"最自然的结果。
+       比判定直径（12）大，所以是"看到的球 ≥ 能打中的范围"，
+       不会出现"看着没碰到却在掉血"。 */
+    sprite: 'assets/characters/yuncai_bolt.png',
+    spriteLen: 20,
+    /* 光效环绕的颜色（画在贴图下面的一层半透明光晕）。
+       挑中等饱和度的紫：场地是浅色方格纸，淡白的光晕在白纸上等于没画。
+       **不配 spritePulse = 这一枚不呼吸**（作者：只有蝙蝠要呼吸）。 */
+    spriteGlow: '#a855f7',
+    /* 不呼吸：这一枚的图恒为完全不透明（只有蝙蝠呼吸） */
+    spritePulse: false,
+    /* 贴图相对**判定中心**的偏移（世界单位，弹道局部坐标：+x 朝前、+y 朝飞行方向的右手侧）。
+       判定中心就是弹道的位置（物理上用那个点做碰撞），所以"图偏了"要记在这里：
+       0 = 图正好套在判定圆上。彗星状的图（亮核在右、尾迹在左）把 x 调大一点，
+       亮核才会压在判定圆上。编辑器里直接拖判定圆就能改这两个数。 */
+    spriteOffX: -2,
+    spriteOffY: -0.5,
     laserDmg: 150, laserSpeed: 1000, laserColor: '#e9d5ff',
     /* 第三发是一道**锚定在晕彩身上、贯穿战场的光柱**。
        长度取 1400：所有场地 × 所有尺寸里最长的对角线是 1266，
@@ -228,7 +250,7 @@ export const YUNCAI = {
   },
 
   /* ⑥ 辉光领域 */
-  domain: { dodge: 0.10, dodgeBloomed: 0.15 },
+  domain: { dodge: 0.15, dodgeBloomed: 0.24 },
 
   /* ⑦ 析光 */
   xiguang: {
@@ -320,6 +342,58 @@ export const SKILL_CAIGUANG = {
 /* ------------------------------------------------------------
    ② 魔弹：每 2 秒一发淡紫魔力球；累计命中两次后，下一发变激光
    ------------------------------------------------------------ */
+/* ------------------------------------------------------------
+   魔弹与激光的"发射原语" —— 晕彩的②与见晴的③**共用这一份**
+   ------------------------------------------------------------
+   见晴的「水镜·魔力共鸣（深蓝紫 / 白）」按作者设定就是"借晕彩的魔弹技能"，
+   只有参数不同（伤害 / 弹速 / 间隔 / 颜色），行为必须完全一致。
+   两份各写一遍迟早会漂（本项目在"五连发扇形"上吃过一次亏：
+   预览画 14°、真正飞出去 24°），所以发射逻辑只此一份，两边都调它。
+   ------------------------------------------------------------ */
+function spawnModanBullet(battle, unit, target, spec) {
+  /* 方向：玩家操控时是鼠标方向，否则朝目标（见 core.js 的 aimUnit） */
+  const { ux, uy } = battle.aimUnit(unit, target);
+  const spd = spec.speed * SCALE;
+  battle._spawnProjectile({
+    kind: 'aura', tag: 'modan', owner: unit,
+    x: unit.x, y: unit.y,
+    vx: Math.round(ux * spd), vy: Math.round(uy * spd),
+    damage: battle._lightDamage(unit, spec.damage, spec.lightBonus),
+    radius: Math.round(spec.r * SCALE),
+    life: spec.life, color: spec.color, traits: ['light'],
+    sprite: spec.sprite, spriteLen: spec.spriteLen,
+    spriteGlow: spec.spriteGlow, spritePulse: spec.spritePulse,
+    spriteOffX: spec.spriteOffX, spriteOffY: spec.spriteOffY,
+    onHit: spec.onHit, onAbsorb: spec.onAbsorb,
+  });
+}
+
+/** 贯穿光柱：一端钉在施法者身上、朝发射那一刻的方向铺出去，每个目标只结算一次 */
+function spawnLaserBeam(battle, unit, target, spec) {
+  const { ux, uy } = battle.aimUnit(unit, target);
+  const spd = spec.speed * SCALE;
+  battle._spawnProjectile({
+    kind: 'aura', tag: 'laser', owner: unit,
+    x: unit.x, y: unit.y,
+    vx: Math.round(ux * spd), vy: Math.round(uy * spd),
+    damage: battle._lightDamage(unit, spec.damage, spec.lightBonus),
+    /* 碰撞半径只用于"撞墙夹紧"；它锚在施法者身上，而人永远离墙 ≥ 半径，
+       所以这道光柱不会因为贴墙而消失。真正的伤害走胶囊判定。 */
+    radius: Math.round(2 * SCALE),
+    width: spec.width,
+    beam: true,
+    beamForward: true,        // 从身上**向前**画（普通激光是往后画拖影）
+    beamLen: spec.len,
+    anchor: unit.id,          // 一端始终钉在身上
+    /* 刻意**不设 anchorTarget** —— 设了就会每帧朝目标转向 */
+    noBodyHit: true,          // 不走"贴到就爆"的弹体命中
+    sweepOnce: true,          // 每个目标只结算一次
+    absorbable: false,        // 穿过细线，但仍然喂它"光"
+    life: spec.life,
+    color: spec.color, traits: ['light'],
+  });
+}
+
 export const SKILL_MODAN = {
   id: 'yuncai_modan',
   name: '魔弹',
@@ -355,48 +429,23 @@ export const SKILL_MODAN = {
              但**依然提供"光"**（细线照样进阶，每条只喂一次）；
            · sweepOnce —— 每个敌人只吃一下，不会像 tickDamage 那样反复结算。 */
       unit.flags.modanHits = 0;
-      const dx = target.x - unit.x, dy = target.y - unit.y;
-      const d = Math.hypot(dx, dy) || 1;
-      const spd = P.laserSpeed * SCALE;
-      battle._spawnProjectile({
-        kind: 'aura', tag: 'laser', owner: unit,
-        x: unit.x, y: unit.y,
-        vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
-        damage: battle._lightDamage(unit, P.laserDmg),
-        /* 碰撞半径只用于"撞墙夹紧"；它锚在晕彩身上，而她永远离墙 ≥ 她的半径，
-           所以这道光柱不会因为贴墙而消失。真正的伤害走下面的胶囊判定。 */
-        radius: Math.round(2 * SCALE),
-        width: P.laserWidth,
-        beam: true,
-        beamForward: true,        // 从晕彩身上**向前**画（普通激光是往后画拖影）
-        beamLen: P.laserLen,
-        anchor: unit.id,          // 一端始终钉在晕彩身上
-        /* 刻意**不设 anchorTarget** —— 设了就会每帧朝目标转向，那是缇娜的光柱 */
-        noBodyHit: true,          // 不走"贴到就爆"的弹体命中
-        sweepOnce: true,          // 每个目标只结算一次
-        absorbable: false,        // 穿过细线，但仍然喂它"光"
-        life: P.laserLife,
-        color: P.laserColor, traits: ['light'],
+      spawnLaserBeam(battle, unit, target, {
+        damage: P.laserDmg, speed: P.laserSpeed, life: P.laserLife,
+        color: P.laserColor, width: P.laserWidth, len: P.laserLen,
       });
     } else {
-      const dx = target.x - unit.x, dy = target.y - unit.y;
-      const d = Math.hypot(dx, dy) || 1;
-      const spd = P.speed * SCALE;
       /* 命中计数：打中敌人算一次，**被裁光的细线吸收也算一次** ——
-         都是"这发魔力球确实命中了东西"，所以共用一个回调。 */
+         都是"这发魔力球确实命中了东西"，所以共用一个回调。
+         见晴借去的那一枚不数（她不带激光形态）。 */
       const countHit = (b, from) => {
         if (!from) return;
         from.flags.modanHits = (from.flags.modanHits || 0) + 1;
       };
-      battle._spawnProjectile({
-        kind: 'aura', tag: 'modan', owner: unit,
-        x: unit.x, y: unit.y,
-        vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
-        damage: battle._lightDamage(unit, P.dmg),
-        radius: Math.round(P.r * SCALE),
-        life: P.life, color: P.color, traits: ['light'],
-        onHit: countHit,
-        onAbsorb: countHit,
+      spawnModanBullet(battle, unit, target, {
+        damage: P.dmg, speed: P.speed, r: P.r, life: P.life, color: P.color,
+        sprite: P.sprite, spriteLen: P.spriteLen, spriteGlow: P.spriteGlow,
+        spritePulse: P.spritePulse, spriteOffX: P.spriteOffX, spriteOffY: P.spriteOffY,
+        onHit: countHit, onAbsorb: countHit,
       });
     }
     return true;
@@ -492,9 +541,11 @@ export const SKILL_PRISM = {
     if (!target) return false;
     const P = YUNCAI.prism;
 
-    const dx = target.x - unit.x, dy = target.y - unit.y;
-    const d = Math.hypot(dx, dy) || 1;
-    const ux = dx / d, uy = dy / d;
+    /* 这一式的"正前方"：玩家操控时是鼠标方向，否则朝目标。
+       光门与光炮共用它 —— 两边必须一致，不然门和炮会各朝一边。 */
+    const aim = battle.aimUnit(unit, target);
+    const ux = aim.ux, uy = aim.uy;
+    const d = Math.hypot(target.x - unit.x, target.y - unit.y) || 1;
 
     /* 光门：放在敌人前方 gateLead 处，再夹进场地内（不能放到墙外去） */
     const gd = Math.max(40, d / SCALE - P.gateLead);
@@ -539,13 +590,20 @@ export const SKILL_DOMAIN = {
   trigger: { type: 'passive' },
   passive(battle, unit) {
     unit.dodge = unit.bloomed ? YUNCAI.domain.dodgeBloomed : YUNCAI.domain.dodge;
-    battle.aurora = true;
-    /* 渲染层画"气浪展开"要用的三个量，只在激活这一刻写一次。
-       中心是**固定**的：气浪从晕彩当时的位置向外扩散到铺满全场；
-       若让它跟着晕彩走，离她远的那半边就永远扫不到。 */
-    battle.auroraAt = battle.frame;
-    battle.auroraCenter = { x: unit.x, y: unit.y };
-    battle.auroraStyle = unit.domain || null;
+    /* 渲染层画"气浪展开"要用的三个量，只在**第一次**激活时写。
+       为什么必须判一次：析光的分身也带这个技能，它的被动会再跑一遍 ——
+       不判的话分身一出生就把 auroraAt 改成"现在"、auroraCenter 改成分身的位置，
+       整场极光会突然重放一次气浪（而且是从分身那一侧扫过来）。
+       另外 `unit.domain` 必须存在：早期 _spawnSummon 漏拷了这个字段，
+       于是分身的被动把 auroraStyle 覆盖成 null → **极光整个消失**（看着像领域失效）。 */
+    if (!battle.aurora) {
+      battle.aurora = true;
+      battle.auroraAt = battle.frame;
+      /* 中心是**固定**的：气浪从晕彩当时的位置向外扩散到铺满全场；
+         若让它跟着晕彩走，离她远的那半边就永远扫不到。 */
+      battle.auroraCenter = { x: unit.x, y: unit.y };
+    }
+    battle.auroraStyle = battle.auroraStyle || unit.domain || null;
     battle._emit('domainOn', unit, null, 0, { px: unit.x / SCALE, py: unit.y / SCALE });
   }
 };
@@ -634,7 +692,7 @@ export const TAOYAO = {
   rong: {
     cd: 1, damage: 50, speed: 500, r: 5, life: 1.6, color: '#f9a8d4',
     /* 击退已按作者要求去掉（原本 60）。
-       引擎的 knockback 原语保留 —— 测试球的定点射击还在用，
+       引擎的 knockback 原语保留 —— 诊断夹具里那颗"技能测试球"的定点射击还在用，
        以后哪个技能要击退，直接在这里加回一个数就行。 */
     burstEvery: 5,          // 射 5 次之后
     burstCount: 5,          // 下一次连发 5 支
@@ -644,7 +702,7 @@ export const TAOYAO = {
 
   /* ② 映霞[枯]：黑白箭 + 减速 */
   ku: {
-    cd: 2, damage: 65, speed: 450, r: 5, life: 2.0, color: '#6b7280',
+    cd: 2, damage: 65, speed: 550, r: 5, life: 2.0, color: '#6b7280',
     slow: 20, slowSeconds: 2,
   },
 
@@ -669,9 +727,27 @@ export const TAOYAO = {
     /* 每层旋转速度见 core.js 的 SPIN_RATE_PER_STACK */
   },
 
-  /* 箭矢贴图（作者提供）。映霞两式共用同一支箭的外观 ──
-     目前只有粉色这一张，所以只有「荣」用；「枯」是黑白的，等作者给图。 */
+  /* 两式各有一支箭（作者分别给了图）。
+     注意**两张原图的方向本来不一样**：荣的是横的、箭尖朝右；
+     枯的是竖的、箭尖朝上 —— 构建脚本已经统一转成朝右，
+     所以运行时只管按飞行方向旋转，不必再记"哪张要额外转 90°"。 */
   arrowSprite: 'assets/characters/taoyao_arrow.png',
+  kuArrowSprite: 'assets/characters/taoyao_ku_arrow.png',
+  /* 两支箭的光效环绕颜色：荣是粉箭 → 粉光；枯是黑白箭 → 灰墨光。
+     同样是中等饱和度（场地是浅色方格纸）。 */
+  arrowGlow: '#ec4899',
+  arrowPulse: false,
+  /* 箭矢贴图相对判定中心的偏移（世界单位，局部坐标 +x 朝前） */
+  arrowOffX: -15,
+  arrowOffY: 0,
+  kuArrowGlow: '#64748b',
+  kuArrowPulse: false,
+  kuArrowOffX: -15,
+  kuArrowOffY: 0,
+  /* 两式分别用哪一套弓的美术（索引对应 balls.js 的 bow.arts）。
+     和 bow.kindArt 是同一张表 —— 那边按 castKind 查、这边按技能直接取。 */
+  RONG_ART: 0,
+  KU_ART: 1,
 };
 
 /* 单位身上有没有装「认真拉矢」。
@@ -682,12 +758,33 @@ function hasAim(unit) {
   return !!(unit && unit.skills && unit.skills.includes(SKILL_AIM.id));
 }
 
+/** 取"某个技能对应那一套弓的美术"。
+ *  bow 有两种写法：单一武器直接就是一套；多武器则是 { kindArt, arts }。
+ *  这里按索引取，取不到就回落第一套（宁可画错武器，也别让弓整个消失）。 */
+function bowArtOf(unit, index) {
+  const bow = unit && unit.bow;
+  if (!bow) return null;
+  return bow.arts ? (bow.arts[index] || bow.arts[0]) : bow;
+}
+
+/** 这支箭该画多长：**弓高 × 那套美术自己的箭长比例**。
+ *  两式的弓高一样、但箭长比例不同（荣 0.3415 / 枯 0.3243），
+ *  所以不能共用一个数 —— 搭在弓上的箭和飞出去的箭必须等长。 */
+function arrowLenOf(unit, index) {
+  const art = bowArtOf(unit, index);
+  /* bowH 挂在**每一套美术**上（两把弓各自的尺寸），不是挂在 bow 上 */
+  if (!art || !(art.bowH > 0) || !(art.arrowLenFrac > 0)) return 0;
+  return art.bowH * art.arrowLenFrac;
+}
+
 /* ------------------------------------------------------------
    箭矢的公共部分：映霞两式都靠它发射
    ------------------------------------------------------------ */
 function fireArrow(battle, unit, target, spec) {
-  const dx = target.x - unit.x, dy = target.y - unit.y;
-  const d = Math.hypot(dx, dy) || 1;
+  /* 方向优先级：spec.aim（调用方直接给了方向，例如五连发那一发）
+     → 玩家鼠标方向 → 朝目标。 */
+  const aim = spec.aim || battle.aimUnit(unit, target);
+  const { ux, uy } = aim;
   const spd = spec.speed * SCALE;
   const stacks = hasAim(unit) ? (unit.flags.aimStacks || 0) : 0;
   /* 认真拉矢：每层 +5，只作用于箭矢（春景的光炮不吃） */
@@ -696,12 +793,17 @@ function fireArrow(battle, unit, target, spec) {
   battle._spawnProjectile({
     kind: 'aura', tag: 'arrow', owner: unit,
     sprite: spec.sprite || null,      // 有贴图就画成真箭，没有就回退程序化光点
-    /* 箭矢画多长：直接问单位身上挂着的弓配置（bowH × 箭占弓高的比例）。
+    /* 箭矢画多长：**弓高 × 这一式自己的箭长比例**。
        这样"搭在弓上的箭"和"飞出去的箭"永远等长，改 bowH 也不用两头改。 */
-    spriteLen: (unit.bow && unit.bow.bowH && unit.bow.arrowLenFrac)
-      ? unit.bow.bowH * unit.bow.arrowLenFrac : 0,
+    spriteLen: spec.spriteLen ?? arrowLenOf(unit, TAOYAO.RONG_ART),
+    /* 光效环绕的颜色：默认按"哪一式的箭"给（荣粉 / 枯灰），
+       调用方要用别的颜色也能覆盖。 */
+    spriteGlow: spec.spriteGlow || TAOYAO.arrowGlow,
+    spritePulse: spec.spritePulse ?? TAOYAO.arrowPulse,
+    spriteOffX: spec.spriteOffX ?? TAOYAO.arrowOffX,
+    spriteOffY: spec.spriteOffY ?? TAOYAO.arrowOffY,
     x: unit.x, y: unit.y,
-    vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
+    vx: Math.round(ux * spd), vy: Math.round(uy * spd),
     damage: dmg,
     radius: Math.round(spec.r * SCALE),
     life: spec.life, color: spec.color,
@@ -759,17 +861,23 @@ export const SKILL_RONG = {
     const P = TAOYAO.rong;
     const fired = (unit.flags.rongShots || 0) + 1;
     if (fired > P.burstEvery) {
-      /* 五连发：朝目标扇形散开 */
+      /* 五连发：朝目标扇形散开（玩家操控时这个"基准方向"是鼠标方向） */
       unit.flags.rongShots = 0;
-      const base = Math.atan2(target.y - unit.y, target.x - unit.x);
+      const aim = battle.aimUnit(unit, target);
+      const base = Math.atan2(aim.uy, aim.ux);
       const n = P.burstCount;
       for (let i = 0; i < n; i++) {
         const off = (n === 1) ? 0 : (i / (n - 1) * 2 - 1) * P.burstSpread;
         const ang = base + off;
         const dx = Math.cos(ang), dy = Math.sin(ang);
-        fireArrow(battle, unit, {
-          x: unit.x + dx * 1000, y: unit.y + dy * 1000,   // 借方向，用假目标
-        }, { ...P, damage: P.burstDmg, knockback: 0, sprite: TAOYAO.arrowSprite });
+        /* ⚠ 这里必须**显式**把方向交给 fireArrow（spec.aim）：
+           以前是塞一个 1000 单位外的假目标当方向载体，而 fireArrow 现在
+           会优先看鼠标方向 —— 不显式给方向的话，五支箭会全部叠向鼠标，
+           扇形直接消失（作者一眼就能看出来）。 */
+        fireArrow(battle, unit, null, {
+          ...P, aim: { ux: dx, uy: dy },
+          damage: P.burstDmg, knockback: 0, sprite: TAOYAO.arrowSprite,
+        });
       }
       battle._emit('arrowBurst', unit, target, n);
     } else {
@@ -789,6 +897,10 @@ export const SKILL_KU = {
   group: 'yingxia',
   aims: true,
   windup: 0.4,
+  /* 施法变体 2 = "用第二套弓的美术"（枯的墨色花枝弓）。
+     荣是 0（普通）/ 1（五连发），所以变体号同时也是"换哪张弓"的索引，
+     两边共用 balls.js 的 bow.kindArt 那张表。 */
+  castKind() { return 2; },
   desc: '每2秒发射一支黑白色的箭矢，箭矢移动速度为450，造成65伤害，' +
         '被命中后的小球移动速度减少20，持续2秒。',
   descDetail: `每 ${TAOYAO.ku.cd} 秒瞄准最近的敌人发射一支黑白箭矢` +
@@ -808,6 +920,13 @@ export const SKILL_KU = {
     const stacks = hasAim(unit) ? (unit.flags.aimStacks || 0) : 0;
     battle._spawnProjectile({
       kind: 'aura', tag: 'arrow', owner: unit,
+      /* 枯有自己的黑白箭（荣那支是粉的），长度也按枯那套弓算 */
+      sprite: TAOYAO.kuArrowSprite,
+      spriteLen: arrowLenOf(unit, TAOYAO.KU_ART),
+      spriteGlow: TAOYAO.kuArrowGlow,
+      spritePulse: TAOYAO.kuArrowPulse,
+      spriteOffX: TAOYAO.kuArrowOffX,
+      spriteOffY: TAOYAO.kuArrowOffY,
       x: unit.x, y: unit.y,
       vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
       damage: Math.max(1, Math.round((P.damage + TAOYAO.aim.perStack * stacks) * (unit.damageMul ?? 1))),
@@ -897,13 +1016,13 @@ export const SKILL_CHUNJING = {
       unit.flags.chunjingCannon -= P.cannonEvery;
       const target = battle._nearestEnemy(unit);
       if (!target) return;
-      const dx = target.x - unit.x, dy = target.y - unit.y;
-      const d = Math.hypot(dx, dy) || 1;
+      /* 补炮方向：玩家操控时跟鼠标（春景开着的时候由玩家自己瞄） */
+      const aim = battle.aimUnit(unit, target);
       const spd = P.cannonSpeed * SCALE;
       battle._spawnProjectile({
         kind: 'aura', tag: 'chunjing_cannon', owner: unit,
         x: unit.x, y: unit.y,
-        vx: Math.round((dx / d) * spd), vy: Math.round((dy / d) * spd),
+        vx: Math.round(aim.ux * spd), vy: Math.round(aim.uy * spd),
         damage: Math.max(1, Math.round(P.cannonDmg * (unit.damageMul ?? 1))),
         radius: Math.round(P.cannonR * SCALE),
         life: P.cannonLife, color: P.color,
@@ -991,12 +1110,35 @@ export const TINA = {
        260 时半径是 248，蝙蝠基本直飞、只在末端划一道弧。 */
     speed: 150,
     turnPerSec: 60,       // 追踪转速上限（度/秒）
-    damage: 6, r: 5, life: 4,
+    damage: 6, r: 4, life: 4,
     /* 回到缇娜身上时回的血（作者 2026-10 从 6 下调到 3）。
        注意「权杖」只提高**伤害**，不提高回血 —— 回血不是伤害。 */
     heal: 3,
     mana: 1,              // 回到缇娜身上时加的魔力
+    /* 偷到"持续发动型"能力时，借她**用多久**（作者 2026-10：5 秒）。
+       那类能力（见晴的变色 / 常驻长剑…）单放一次是没有意义的 ——
+       它们的完整效果就是一段持续状态，所以要借一段时间。 */
+    stealSeconds: 5,
     color: '#a21caf',
+    /* 蝙蝠的美术（作者给的图）。方向已由 tools/make-sprites.mjs 统一成
+       "头朝 +X"，所以渲染层照旧只按 atan2(vy,vx) 转，运行时不用记偏移。
+       **spriteLen 由作者定：先要 34，看过之后要求"改成现在的四分之一"，所以是 8.5。**
+       追踪/返程都是每帧改速度方向，所以它会跟着转弯，天然是"扑向目标"。 */
+    sprite: 'assets/characters/tina_bat.png',
+    spriteLen: 8.5,
+    /* 光晕用红色 —— 对应**图本身的颜色**（那只蝙蝠是红的），
+       不是技能表里的 color（#a21caf 紫，那是程序化回退光点用的）。 */
+    spriteGlow: '#dc2626',
+    /* **只有蝙蝠要透明度呼吸**（作者）：它的图与光晕在 25%~40% 之间来回浮动。
+       其他弹道一律不呼吸、图保持完全不透明 —— 所以这里这一个开关
+       就是"谁在呼吸"的唯一出处。 */
+    spritePulse: true,
+    /* 贴图相对**判定中心**的偏移（世界单位，弹道局部坐标：+x 朝前、+y 朝飞行方向的右手侧）。
+       判定中心就是弹道的位置（物理上用那个点做碰撞），所以"图偏了"要记在这里：
+       0 = 图正好套在判定圆上。彗星状的图（亮核在右、尾迹在左）把 x 调大一点，
+       亮核才会压在判定圆上。编辑器里直接拖判定圆就能改这两个数。 */
+    spriteOffX: -0.5,
+    spriteOffY: 0,
   },
 
   /* ③ 魔力霰弹 */
@@ -1005,8 +1147,21 @@ export const TINA = {
     count: 3,
     windowSeconds: 0.5,   // 一轮里的 3 发在 0.5 秒内打完
     spreadDeg: 15,        // 每发随机偏 0~15°
-    damage: 30, speed: 420, r: 5, life: 2.2,
+    damage: 30, speed: 420, r: 5.5, life: 2.2,
     color: '#e11d48',     // 猩红
+    /* 猩红魔弹的美术：亮核在右、尾迹拖在左的彗星。
+       判定是半径 5 的圆（直径 10），spriteLen 取到"图里的亮核 ≈ 判定直径"
+       —— 亮核约占图宽的 45~50%，24 × 0.48 ≈ 11.5。 */
+    sprite: 'assets/characters/tina_bolt.png',
+    spriteLen: 24,
+    spriteGlow: '#f43f5e',
+    spritePulse: false,
+    /* 贴图相对**判定中心**的偏移（世界单位，弹道局部坐标：+x 朝前、+y 朝飞行方向的右手侧）。
+       判定中心就是弹道的位置（物理上用那个点做碰撞），所以"图偏了"要记在这里：
+       0 = 图正好套在判定圆上。彗星状的图（亮核在右、尾迹在左）把 x 调大一点，
+       亮核才会压在判定圆上。编辑器里直接拖判定圆就能改这两个数。 */
+    spriteOffX: -2.5,
+    spriteOffY: 0,
   },
 
   /* ④ 权杖（被动） */
@@ -1024,9 +1179,110 @@ export const TINA = {
   },
 };
 
+/* ============================================================
+   见晴（魔法少女[白水仙]）—— 水镜三态 + 起飞 + 精灵变身 + 羽毛
+   ------------------------------------------------------------
+   作者 2026-10 的规格。基础数值：**血量 1500 / 速度 120 / 碰撞伤害 30 /
+   标准体型（与晕彩一致，r = 16）**。
+
+   六个技能是**三个各自独立的水镜**（作者确认：可以分开装配，
+   各有一套自己的颜色循环）+ 起飞 + 精灵变身 + 羽毛：
+
+     ① 水镜（防御）  每 5 秒随机切淡绿 / 淡粉
+     ② 水镜（猩红）  常驻：速度 +10、身侧一柄长剑（砍人 / 消魔弹）
+     ③ 水镜（双色）  每 9 秒随机切深蓝紫 / 白（借晕彩的魔弹 / 激光）
+     ④ 起飞          累计移动 1560 单位后飞 3 秒
+     ⑤ 精灵变身      装备即永久：体型减半、速度 +50、所有伤害减半
+     ⑥ 我很可爱      每掉 300 血发一根追踪羽毛
+
+   两个"必须记住"的点（都在引擎里落地，见 core.js）：
+     · ①③ 两套颜色循环是**各自独立**的，所以快照给了两个颜色位
+       （16 防守色 / 17 借用色）—— 一个字段装不下两个循环；
+     · ④ 的"只与墙壁碰撞"用 phasingFrames 一个开关关掉**碰撞、分离、撞伤**
+       三件事（它们都先问 overlapping），"免伤"用 invulnFrames，
+       "不发动攻击"用 noAttackFrames（只拦冷却类与 onThink，
+       被动 / 护盾 / 受伤钩子照常 —— 那才是作者说的"防御效果"）。
+   ============================================================ */
+export const JIANQING = {
+  /* ① 水镜·魔力共鸣（防御） */
+  mirrorDef: {
+    cycle: 5,                 // 每 5 秒随机切一次（允许连续切到同一个颜色）
+    healPerSec: 15,           // 淡绿色：每秒回复
+    meleeBonus: 10,           // 淡粉色：碰撞伤害提高
+    shieldPerSec: 30,         // 淡粉色：每秒生成一个"能抵挡 30 伤害"的护盾
+    shieldMax: 300,           // 护盾上限（作者确认：300 = 连续淡粉 10 秒的量）
+    shieldDecayPerSec: 5,     // 不在淡粉色时护盾每秒衰减
+  },
+  /* ② 水镜·魔力共鸣（猩红色） */
+  mirrorSword: {
+    speedBonus: 10,           // 移动速度提高 10 点
+    swordLen: 32,             // 长剑长度 = 小球直径（r=16 → 32）
+    frontDeg: 120,            // "见晴前方 120° 范围"
+    sweepDeg: 120,            // 挥动动画的扫过角度（以球心为轴转这么多度）
+    dmg: 80,                  // 挥动一次 80 点伤害
+    atkInterval: 1,           // 攻击性挥动间隔（秒，至少）
+    defInterval: 2.5,           // 防御性挥动（消魔弹）间隔（秒，至少）
+    purgeMax: 3,              // 一次最多消除 3 个魔弹
+    swingFrames: 12,          // 挥动动画帧数（纯表现；判定在触发那一帧完成）
+    color: '#8b1a1a',         // 猩红（暂时用深红光柱替代美术）
+  },
+  /* ③ 水镜·魔力共鸣（深蓝紫色和白色） */
+  mirrorBorrow: {
+    cycle: 9,                 // 每 9 秒随机切一次
+    /* 深蓝紫：借晕彩的魔弹（**没有第三发激光**）。
+       3 秒一发 → 一个 9 秒周期里会打出 4 发（第 0 / 3 / 6 / 9 秒各一发）。 */
+    modanCd: 3, modanDmg: 75, modanSpeed: 600, modanR: 6, modanLife: 4,
+    modanColor: '#5b21b6',
+    /* 白色：借魔弹的激光（贯穿、每个目标只结算一次、持续 0.5 秒）。
+       4 秒一发 → 一个 9 秒周期里 3 发（第 0 / 4 / 8 秒）。 */
+    laserCd: 4, laserDmg: 170, laserSpeed: 1000, laserLife: 0.5,
+    laserWidth: 20, laserLen: 1400, laserColor: '#ffffff',
+  },
+  /* ④ 起飞 */
+  takeoff: {
+    distance: 1560,           // 累计移动这么多世界单位后起飞（落地后重新累计）
+    seconds: 4,               // 滞空时间（作者在编辑器里调的：3 → 5 → 4）
+    speedBonus: 150,          // 空中移速提高（**临时的**：落地就撤）
+    /* 作者 2026-10 的第二次改口径：
+         · 免疫 → **受到的所有伤害减半**（帧伤也减半）；
+         · 空中**可以正常使用其它所有技能**（原先禁止攻击那条已取消）；
+         · 移动中持续以最多 45°/秒 修正航向追踪敌人。 */
+    damageTakenMul: 0.5,      // 空中受到的伤害倍率
+    turnPerSec: 45,           // 空中每秒最多修正多少度（追踪最近的敌人）
+    frameDamage: 5,           // 与任一小球重合时每帧 5 点（帧伤，走 _tickDamage）
+    scale: 1.35,              // 表现：变大（判定箱不变，见 README）
+    wallHoming: true,         // 撞墙后航向**直接指向最近的敌人**（否则随机反弹）
+    /* ---------- 每次飞行之后的永久成长（作者 2026-10 的新机制）----------
+       "见晴每次起飞过后，速度永久加 5，下次起飞的帧伤增加 0.5，可叠加"。
+       两项都在**落地那一刻**结算 —— 所以第 1 次飞行用的还是原始数值，
+       从第 2 次起才吃到 +0.5（速度的 +5 从落地后就永久生效）。 */
+    speedPerFlight: 5,        // 每完成一次飞行：移速永久 +5（可叠加）
+    frameDamagePerFlight: 0.5,// 每完成一次飞行：之后每次飞行的帧伤 +0.5（可叠加）
+  },  /* ⑤ 精灵变身（装备即生效，作者确认） */
+  transform: {
+    sizeMul: 0.6,             // 体型倍率（作者在编辑器里调的；判定与显示一起变）
+    speedBonus: 55,           // 移速加成
+    damageMul: 0.7,           // 造成的**所有**伤害的倍率
+    swordMul: 0.6,            // ② 的长剑长度倍率
+  },
+  /* ⑥ 我很可爱 */
+  feather: {
+    hpStep: 300,              // 每掉这么多血发一根
+    speed: 250,               // 羽毛速度
+    r: 6, life: 9,
+    turnPerSec: 220,          // 追踪转速上限（度/秒）
+    bounces: 3,               // 可以撞墙反弹
+    slowMul: 0.5, slowSeconds: 3,   // 命中：移速减半，持续 3 秒
+    meleeMinus: 5, skillMinus: 5,   // 命中：碰撞/技能伤害各 -5（可叠加，本局永久）
+    color: '#bfe3ff',
+  },
+};
+
 /* ---------- 小工具 ---------- */
 const TINA_SUCK_ID = 'tina_suck';
-const hasSkill = (unit, id) => !!(unit && unit.skills && unit.skills.includes(id));
+/* "此刻拥有这个技能" = 本体的 or 借来的（缇娜偷学来的那是真的能用了） */
+const hasSkill = (unit, id) =>
+  !!(unit && ((unit.skills && unit.skills.includes(id)) || (unit.borrow && unit.borrow[id])));
 
 /* 权杖是否在身上。它是被动，装了就生效，所以别的技能按这个开关取修正值。 */
 const withScepter = (unit) => !!(unit && unit.flags && unit.flags.tinaScepter);
@@ -1071,12 +1327,11 @@ function fireBat(battle, unit, target) {
   const scep = withScepter(unit);
   const turn = P.turnPerSec + (scep ? TINA.scepter.turnBonusDeg : 0);
   const dmg = Math.max(1, Math.round(P.damage * (scep ? TINA.scepter.damageMul : 1)));
-  const dx = target.x - unit.x, dy = target.y - unit.y;
-  const d = Math.hypot(dx, dy) || 1;
   const spd = P.speed * SCALE;
-  /* 初始方向：朝目标，但**随机散开一点** ——
+  /* 初始方向：朝目标（玩家操控时是鼠标方向），但**随机散开一点** ——
      3~5 只如果完全同向重叠，看起来只有一只。 */
-  const base = Math.atan2(dy, dx) + (battle.rnd() * 2 - 1) * 0.5;
+  const aim = battle.aimUnit(unit, target);
+  const base = Math.atan2(aim.uy, aim.ux) + (battle.rnd() * 2 - 1) * 0.5;
   return battle._spawnProjectile({
     kind: 'body', tag: 'bat', owner: unit,
     x: unit.x, y: unit.y,
@@ -1087,6 +1342,9 @@ function fireBat(battle, unit, target) {
        画面上是一个亚像素点，等于"看不到特效"。 */
     radius: Math.round(P.r * SCALE),
     life: P.life, color: P.color,
+    sprite: P.sprite, spriteLen: P.spriteLen,
+    spriteGlow: P.spriteGlow, spritePulse: P.spritePulse,
+    spriteOffX: P.spriteOffX, spriteOffY: P.spriteOffY,
     homing: { targetId: target.id, turnPerSec: turn },
     returnTo: unit.id,
     onHit: (b, from, to) => { if (from && to) from.flags.batLastHit = to.id; },
@@ -1104,18 +1362,22 @@ function fireBat(battle, unit, target) {
   });
 }
 
-/** 能被"偷学"的技能：**能释放一次的主动技能**。
+/** 能被"偷学"的技能：**能释放一次的主动技能** + **持续发动型能力**。
  *  作者口径是排除"领域类 / 近战类 / 碰撞墙壁类"，这三类在本项目里恰好
  *  全都是被动（辉光领域、折光）或撞墙触发（裁光），所以一条规则就够：
  *    有 run()（被动没有）+ 不是 onWall（碰撞墙壁类）
- *  比逐个点名白名单稳 —— 以后新加的技能自动被正确归类。 */
+ *  比逐个点名白名单稳 —— 以后新加的技能自动被正确归类。
+ *
+ *  ⚠ 2026-10 补的一条：标了 `sustain` 的技能（见晴 ①②③ 这类
+ *  "变色 / 常驻"能力）没有 run() 也可能被偷 —— 它们的完整效果是
+ *  一段持续状态，判定不能只看"有没有 run"。 */
 function stealableFrom(victim) {
   const out = [];
   for (const id of victim.skills || []) {
     const sk = getSkill(id);
-    if (!sk || typeof sk.run !== 'function') continue;
+    if (!sk || sk.noSteal) continue;
     if (!sk.trigger || sk.trigger.type === 'onWall') continue;
-    if (sk.noSteal) continue;
+    if (typeof sk.run !== 'function' && !sk.sustain) continue;
     out.push(sk);
   }
   return out;
@@ -1130,6 +1392,17 @@ function stealAndCast(battle, tina) {
   if (!pool.length) return null;
   const sk = pool[Math.floor(battle.rnd() * pool.length) % pool.length];
   const target = battle._nearestEnemy(tina);
+  /* ---------- 持续发动型：不是"放一次"，而是"借来用 N 秒" ----------
+     作者 2026-10 报的 bug：偷到见晴的变色能力时"发动了但没有任何效果"。
+     原因：那类能力的 run() 只切一次颜色，真正的效果全在它自己的
+     被动 + 每帧钩子里；缇娜身上没有那些钩子，所以放完什么都不会发生。
+     所以这里改成把技能**临时装到缇娜身上**：被动、钩子、冷却全都真的跑起来，
+     到期由引擎摘掉（含技能自己的 onUnborrow 收尾）。 */
+  if (sk.sustain) {
+    const ok = battle.grantSkill(tina, sk.id, TINA.bat.stealSeconds);
+    battle._emit('steal', tina, victim, ok ? 1 : 0, { skill: sk.name, sustain: true });
+    return sk;
+  }
   let ok = false;
   try {
     ok = !!sk.run({ battle, unit: tina, target });
@@ -1220,7 +1493,9 @@ export const SKILL_TINA_BAT = {
         '蝙蝠命中后对敌方小球造成6点伤害，随后会返回缇娜身上，' +
         '每只蝙蝠返回会恢复缇娜3点生命值，并提供一点魔力计数。' +
         '魔力计数满5点后，根据蝙蝠最后命中的目标，缇娜会随机抽取其一个技能' +
-        '（不会释放领域类、近战类、以及碰撞墙壁类的技能）释放一次。',
+        '（不会释放领域类、近战类、以及碰撞墙壁类的技能）释放一次；' +
+        '若抽到的是持续发动型的能力（见晴的水镜 / 变身等），则改为借用该能力5秒；' +
+        '抽到起飞则立刻起飞，抽到「我很可爱」则立刻发一根羽毛。',
   descDetail: `每 ${TINA.bat.cd} 秒放出一批 **${TINA.bat.minCount}~${TINA.bat.maxCount} 只**小蝙蝠，` +
         `朝最近的敌人追踪：速度 ${TINA.bat.speed}，**每秒最多偏转 ${TINA.bat.turnPerSec}°**` +
         `（是"转速上限"而不是"总偏角上限"——追不到就会绕圈追）。` +
@@ -1229,7 +1504,15 @@ export const SKILL_TINA_BAT = {
         `魔力 +${TINA.bat.mana}。` +
         `魔力满 ${5} 点后清空，并按**最后命中的目标**随机抽它一个技能放一次。` +
         `可偷的范围是"能释放一次的主动技能"：被动（辉光领域、折光、认真拉矢、陀螺…）` +
-        `没有"释放一次"这回事，撞墙触发的（裁光）也在排除之列。` +
+        `没有"释放一次"这回事，撞墙触发的（裁光）也在排除之列。\n` +
+        `抽到**持续发动型**能力时不是"放一次"——那类能力的效果本身就是一段持续状态，` +
+        `放一次等于什么都没发生（作者实测报过：偷到见晴的变色能力，颜色变了但一滴血没回）。` +
+        `所以按能力分三种处理：\n` +
+        `· 变色 / 常驻类（见晴 ① ② ③、精灵变身）：**借来用 ${TINA.bat.stealSeconds} 秒** ——` +
+        `期间它的被动、每帧效果、冷却触发全都真的跑在缇娜身上，时间到了自动归还（含资源条还原）；\n` +
+        `· 起飞：借来的那一刻**立刻起飞**，滞空 ${JIANQING.takeoff.seconds} 秒，` +
+        `落地那份"每次飞完永久 +${JIANQING.takeoff.speedPerFlight} 移速"照给，而且归还时不会被撤掉；\n` +
+        `· 我很可爱：**立刻发一根羽毛**（不用等掉血）。\n` +
         `装上「权杖」后：伤害 ×4/3，偏转角 +${TINA.scepter.turnBonusDeg}°（→ ${TINA.bat.turnPerSec + TINA.scepter.turnBonusDeg}°/秒）。`,
   trigger: { type: 'cooldown', cd: TINA.bat.cd },
   run(ctx) {
@@ -1285,7 +1568,9 @@ function fireShot(battle, unit, target) {
   const P = TINA.shot;
   const scep = withScepter(unit);
   const dmg = Math.max(1, Math.round(P.damage * (scep ? TINA.scepter.damageMul : 1)));
-  const base = Math.atan2(target.y - unit.y, target.x - unit.x);
+  /* 基准方向：玩家操控时是鼠标方向，否则朝目标 */
+  const aim = battle.aimUnit(unit, target);
+  const base = Math.atan2(aim.uy, aim.ux);
   const off = (battle.rnd() * 2 - 1) * ((P.spreadDeg * Math.PI) / 180);
   const a = base + off;
   const spd = P.speed * SCALE;
@@ -1295,6 +1580,9 @@ function fireShot(battle, unit, target) {
     vx: Math.round(Math.cos(a) * spd),
     vy: Math.round(Math.sin(a) * spd),
     damage: dmg, radius: Math.round(P.r * SCALE), life: P.life, color: P.color,
+    sprite: P.sprite, spriteLen: P.spriteLen,
+    spriteGlow: P.spriteGlow, spritePulse: P.spritePulse,
+    spriteOffX: P.spriteOffX, spriteOffY: P.spriteOffY,
   });
   /* 不要再 emit('shoot') —— _spawnProjectile 自己就会发一条
      （带 px/py/color/tag）。技能里再发一次的话，上层统计里每发魔弹会变成两发。 */
@@ -1439,6 +1727,668 @@ export const SKILL_TINA_P3 = {
 /* ------------------------------------------------------------
    注册表：小球通过 skills: ['test_shot','test_dash'] 引用
    ------------------------------------------------------------ */
+/* ============================================================
+   见晴（魔法少女[白水仙]）· 六个技能
+   ============================================================ */
+
+/* ------------------------------------------------------------
+   ① 水镜·魔力共鸣（防御）：每 5 秒随机切淡绿 / 淡粉
+   ------------------------------------------------------------
+   淡绿 = 每秒回血；淡粉 = 碰撞 +10、每秒 +30 护盾。
+   护盾是"水镜护盾"资源条（物种上的 resource）：**受到的伤害先扣它**，
+   所以吸收写在 onBeforeDamage 里 —— 那是引擎留给"护盾/减伤"的官方出口。
+
+   两个实现细节值得记一笔：
+     · 回血与护盾都按"每秒 N 点"给，**不能每帧取整**（15/60 = 0.25，
+       取整后每帧都是 0，一滴都回不上）。所以各自攒余数，够 1 点才结算 ——
+       回血有引擎的 _heal 帮忙攒，护盾这里自己攒（unit.flags.shieldAcc）。
+     · 每帧都对 _gainResource/_spendResource 会让事件流被 60 条/秒灌满，
+       所以同样按"整数点"结算。 */
+export const SKILL_MIRROR_DEF = {
+  id: 'jianqing_mirror_def',
+  name: '水镜·魔力共鸣（防御）',
+  desc: '每五秒切换一次水镜的颜色：淡绿色时每秒回复 15 点生命；' +
+        '淡粉色时造成的碰撞伤害提高 10，每秒生成一个可以抵挡 30 点伤害的护盾。',
+  descDetail: `每 ${JIANQING.mirrorDef.cycle} 秒**随机**切一次颜色（淡绿 / 淡粉），` +
+        `允许连续切到同一个颜色。切换时见晴身前张开一副水镜，她穿过水镜，小球边缘那一圈随之换色。\n` +
+        `· 淡绿色：每秒回复 ${JIANQING.mirrorDef.healPerSec} 点生命。\n` +
+        `· 淡粉色：碰撞伤害 +${JIANQING.mirrorDef.meleeBonus}；每秒 +${JIANQING.mirrorDef.shieldPerSec} 点护盾。\n` +
+        `护盾是一个挡伤害的池子，上限 ${JIANQING.mirrorDef.shieldMax}` +
+        `（血条下方那条「水镜护盾」就是它）：受到的伤害先扣护盾，扣完才掉血。` +
+        `**不在淡粉色时**护盾每秒衰减 ${JIANQING.mirrorDef.shieldDecayPerSec} 点。\n` +
+        `起飞期间这套防御效果照常生效（作者明确：它属于 buff 类效果）。`,
+  trigger: { type: 'cooldown', cd: JIANQING.mirrorDef.cycle },
+  /* 玩家操控时**仍然自动触发**（作者 2026-10）：变色属于"被动/形态"，
+     不该占一个技能键。引擎读这个标记：标了 auto 的冷却技能照旧自己放。 */
+  auto: true,
+  /* 持续发动型：完整效果是"一段持续状态"，不是"放一次就完"。
+     所以被缇娜的蝙蝠偷到时，引擎会把它**临时装到缇娜身上 5 秒**
+     （引擎是唯一读它的地方：见 core.js 的 grantSkill 与 skills.js 的
+     stealableFrom / stealAndCast）。
+     单看 run() 只切一次颜色 —— 回血、护盾、碰撞加成全在下面的钩子里。 */
+  sustain: true,
+  passive(battle, unit) {
+    /* 颜色在第 0 帧的第一次 run() 里随机决定 ——
+       那时开局初速方向已经算好，所以不会打乱"同种子同开局"。 */
+    unit.flags.mirrorColor = 0;
+    unit.flags.shieldAcc = 0;
+  },
+  /* 借来的时候要**换资源条**：护盾池用的是物种的"特殊资源"，
+     而缇娜身上那条是魔力（上限 5）—— 拿它当护盾会当场把
+     "魔力满 5 → 偷学"的循环点着（还会把她的魔力花掉）。
+     所以先把她原来的资源定义存起来，借完原样还回去。 */
+  onBorrow(battle, unit) {
+    const P = JIANQING.mirrorDef;
+    unit.flags.borrowRes = { max: unit.resMax, res: unit.res, def: unit.resDef };
+    unit.resMax = P.shieldMax;
+    unit.res = 0;
+    unit.resDef = {
+      id: 'borrowWaterMirror', name: '水镜护盾',
+      max: P.shieldMax, gainPerSec: 0, color: '#f0abfc',
+    };
+  },
+  onUnborrow(battle, unit) {
+    const s = unit.flags.borrowRes;
+    if (s) {
+      unit.resMax = s.max; unit.res = s.res; unit.resDef = s.def;
+      delete unit.flags.borrowRes;
+    }
+    /* 淡粉色那份碰撞加成要撤掉（它记在 mirrorMelee 上）——
+       不撤的话缇娜会永久 +10 碰撞伤害。 */
+    if ((unit.flags.mirrorMelee || 0) !== 0) {
+      unit.meleeBonus = (unit.meleeBonus || 0) - unit.flags.mirrorMelee;
+      unit.flags.mirrorMelee = 0;
+      battle.refreshMelee(unit);
+    }
+    unit.flags.mirrorColor = 0;
+    unit.ringKind = 0;
+  },
+  run({ battle, unit }) {
+    /* 两个颜色等概率，**允许连续切到同一个**（作者原话） */
+    const color = battle.rnd() < 0.5 ? 1 : 2;
+    unit.flags.mirrorColor = color;
+    unit.ringKind = color;
+    /* face 一起带上：渲染层要按她的朝向画"身前那副水镜"
+       （事件里只有位置，没有朝向 —— 而镜面是有方向的） */
+    battle._emit('mirrorSwitch', unit, null, color, { face: unit.face ?? 0, def: true });
+    return true;
+  },
+  hooks: {
+    /* 每帧的防御效果（起飞期间也照常：onMove 不在"禁止攻击"的拦截范围内） */
+    onMove(battle, unit) {
+      const P = JIANQING.mirrorDef;
+      const color = unit.flags.mirrorColor;
+      /* ---- 淡粉色的碰撞伤害 +10 ----
+         走"基础 + 加成"模型：先把自己上一次加的那份撤掉，再按当前颜色加回去。
+         直接 `melee += 10` 会随着切色反复累加（第 3 次切到淡粉就 +30）。 */
+      const want = color === 2 ? P.meleeBonus : 0;
+      if ((unit.flags.mirrorMelee || 0) !== want) {
+        unit.meleeBonus = (unit.meleeBonus || 0) - (unit.flags.mirrorMelee || 0) + want;
+        unit.flags.mirrorMelee = want;
+        battle.refreshMelee(unit);
+      }
+      if (color === 1) {
+        battle._heal(unit, P.healPerSec * DT);
+        unit.flags.shieldAcc = 0;
+      } else if (color === 2) {
+        /* 淡粉：每秒 +30。攒余数，够 1 点才结算（否则每帧都发资源事件，60 条/秒） */
+        unit.flags.shieldAcc = Math.max(0, unit.flags.shieldAcc || 0) + P.shieldPerSec * DT;
+        unit.flags.shieldDecayAcc = 0;
+        const whole = Math.floor(unit.flags.shieldAcc);
+        if (whole > 0) {
+          unit.flags.shieldAcc -= whole;
+          battle._gainResource(unit, whole, 'waterMirror');
+        }
+      } else {
+        unit.flags.shieldAcc = 0;
+      }
+      /* 不在淡粉色：护盾每秒衰减 5（同样攒够 1 点才结算）。
+         ⚠ 这里必须用**另一个**累加器：和上面共用一个的话，
+         "淡绿分支把它清零" 会把衰减的余数一起抹掉 —— 实测表现就是
+         "切回淡绿之后护盾一点都不会掉"（存了半天才发现）。 */
+      if (color !== 2) {
+        if (unit.res > 0) {
+          unit.flags.shieldDecayAcc = (unit.flags.shieldDecayAcc || 0) + P.shieldDecayPerSec * DT;
+          const whole = Math.floor(unit.flags.shieldDecayAcc);
+          if (whole > 0) {
+            unit.flags.shieldDecayAcc -= whole;
+            battle._spendResource(unit, whole, 'decay');
+          }
+        } else {
+          unit.flags.shieldDecayAcc = 0;
+        }
+      }
+    },
+    /* 护盾吸收：先扣护盾，剩下的才打到血上 */
+    onBeforeDamage(battle, unit, ctx) {
+      if (!(unit.res > 0)) return;
+      const spent = battle._spendResource(unit, ctx.amount, 'shield');
+      if (!(spent > 0)) return;
+      battle._emit('shieldHit', unit, null, spent, { amount: ctx.amount });
+      const left = ctx.amount - spent;
+      /* 全额挡下时返回 0 —— 引擎会把这次伤害整个取消（不再夹到 1 点） */
+      return { amount: Math.max(0, left) };
+    },
+  },
+};
+
+/* ------------------------------------------------------------
+   ② 水镜·魔力共鸣（猩红色）：常驻长剑
+   ------------------------------------------------------------
+   "见晴**移动方向**的前方 120° 范围" —— 扇形中心是她的速度方向（face），
+   不是"朝目标的方向"。站着不动（蓄力等）时才退回 face 字段（上次的朝向）。
+
+   两套间隔各记各的：攻击性挥动 ≥ 1 秒，防御性挥动（消魔弹）≥ 5 秒。
+   两者都放在 onThink 里 —— 那是引擎认定的"攻击决策"钩子，
+   所以起飞期间会被自动拦掉（作者：空中不发动其他技能的攻击）。 */
+export const SKILL_MIRROR_SWORD = {
+  id: 'jianqing_mirror_sword',
+  name: '水镜·魔力共鸣（猩红色）',
+  desc: '移动速度提高 10，小球边缘绑定一柄猩红色的长剑；' +
+        '移动方向前方 120° 出现敌方小球时挥剑造成 80 点伤害，' +
+        '出现敌方魔弹时也会挥剑消除（最多 3 个）。',
+  descDetail: `常驻：移动速度 +${JIANQING.mirrorSword.speedBonus}；` +
+        `小球边缘绑着一柄猩红色长剑，长度等于小球直径（${JIANQING.mirrorSword.swordLen} 世界单位）。\n` +
+        `· **攻击性挥动**：见晴**移动方向**的前方 ${JIANQING.mirrorSword.frontDeg}° 扇形里` +
+        `出现敌方小球就挥剑，造成 ${JIANQING.mirrorSword.dmg} 点伤害；` +
+        `两次之间至少间隔 ${JIANQING.mirrorSword.atkInterval} 秒。\n` +
+        `· **防御性挥动**：同一条扇形里出现敌方弹道（魔弹 / 箭矢 / 蝙蝠…）时也挥剑，` +
+        `一次最多消除 ${JIANQING.mirrorSword.purgeMax} 个，两次之间至少间隔 ` +
+        `${JIANQING.mirrorSword.defInterval} 秒。钉在施法者身上的光柱不算"弹射物"，不会被扫掉。\n` +
+        `长剑暂时用深红色光柱表现（这一式还没有美术）。`,
+  trigger: { type: 'passive' },
+  /* 持续发动型（常驻长剑）：被偷到时按"借用 5 秒"处理 —— 放一次对
+     "常驻"这种能力毫无意义，剑是挂在身上持续挥的。 */
+  sustain: true,
+  passive(battle, unit) {
+    unit.speedBonus = (unit.speedBonus || 0) + JIANQING.mirrorSword.speedBonus;
+    battle.refreshSpeed(unit);
+    /* 剑长记在 swordBase 上：精灵变身（⑤）要把它减半，
+       而两个被动谁先跑取决于装配顺序 —— 所以两边都从 swordBase 现算。 */
+    unit.swordBase = JIANQING.mirrorSword.swordLen;
+    unit.swordLen = unit.swordBase * (unit.smallForm ? JIANQING.transform.swordMul : 1);
+    unit.flags.swordAtkCd = 0;
+    unit.flags.swordDefCd = 0;
+  },
+  /** 归还时把"挂上去的东西"摘掉：移速加成与那柄剑。
+   *  借剑的缇娜身上没有 ⑤，所以直接还原成 0 —— 但移速要按减法撤，
+   *  不能写死（她可能同时被别的技能加过速）。 */
+  onUnborrow(battle, unit) {
+    unit.swordLen = 0;
+    unit.swordBase = 0;
+    unit.speedBonus = (unit.speedBonus || 0) - JIANQING.mirrorSword.speedBonus;
+    battle.refreshSpeed(unit);
+  },
+  hooks: {
+    onThink(battle, unit) {
+      const P = JIANQING.mirrorSword;
+      unit.flags.swordAtkCd = Math.max(0, (unit.flags.swordAtkCd || 0) - DT);
+      unit.flags.swordDefCd = Math.max(0, (unit.flags.swordDefCd || 0) - DT);
+      if (!(unit.swordLen > 0)) return;
+
+      /* 扇形：以**移动方向**为中心。速度几乎为 0（蓄力/贴墙）时用 face 兜底。 */
+      const moving = Math.hypot(unit.vx, unit.vy) > 1;
+      const dir = moving ? Math.atan2(unit.vy, unit.vx)
+        : ((unit.face ?? 0) * Math.PI) / 180;
+      const half = (P.frontDeg / 2) * Math.PI / 180;
+      /* 够得着：球心距 ≤ 自身半径 + 剑长 + 对方半径（"剑尖扫到"的判定）。
+         ⚠ 单位：目标位置与 unit.x/y、unit.r 都是**定点数**（×SCALE），
+         而 swordLen 是**世界单位** —— 混着比会被放大 1000 倍，
+         结果就是"谁都够不着"（或"全都够得着"）。这里统一换算成世界单位再比。 */
+      const selfR = unit.r / SCALE;
+      const inCone = (t, extra) => {
+        const dx = t.x - unit.x, dy = t.y - unit.y;
+        const dist = Math.hypot(dx, dy) / SCALE;      // → 世界单位
+        if (dist > selfR + unit.swordLen + (extra || 0)) return 0;
+        let diff = Math.atan2(dy, dx) - dir;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        return Math.abs(diff) <= half ? dist : 0;
+      };
+
+      /* ---- 防御性挥动：先判（消魔弹的机会更稀有，别被攻击性挥动抢掉）---- */
+      if (unit.flags.swordDefCd <= 0) {
+        const doomed = [];
+        for (const p of battle.projectiles) {
+          if (!p.alive || p.team === unit.team) continue;
+          if (p.beam || p.beamForward || p.anchor >= 0) continue;   // 光柱不算弹射物
+          if (!inCone(p, p.r / SCALE)) continue;
+          doomed.push(p);
+          if (doomed.length >= P.purgeMax) break;
+        }
+        if (doomed.length) {
+          for (const p of doomed) {
+            p.alive = false;
+            battle._emit('projPurge', unit, null, 0, {
+              px: p.x / SCALE, py: p.y / SCALE, color: p.color, tag: p.tag,
+            });
+          }
+          unit.flags.swordDefCd = P.defInterval;
+          unit.flags.swordAtkCd = Math.max(unit.flags.swordAtkCd, 0.001);
+          battle._emit('swordSwing', unit, null, 0, {
+            angle: dir, swordLen: unit.swordLen, kind: 'guard', purged: doomed.length,
+            sweepDeg: P.sweepDeg, swingFrames: P.swingFrames,
+          });
+          return;
+        }
+      }
+
+      /* ---- 攻击性挥动：前方扇形里有敌方小球就砍 ---- */
+      if (unit.flags.swordAtkCd > 0) return;
+      let best = null, bestDist = Infinity;
+      for (const o of battle.units) {
+        if (o === unit || !o.alive || o.team === unit.team) continue;
+        const dist = inCone(o, o.r / SCALE);
+        if (dist > 0 && dist < bestDist) { best = o; bestDist = dist; }
+      }
+      if (!best) return;
+      const dmg = battle._scaledDamage(unit, P.dmg);
+      battle._damage(unit, best, dmg, 'skill');
+      unit.flags.swordAtkCd = P.atkInterval;
+      battle._emit('swordSwing', unit, best, dmg, {
+        angle: Math.atan2(best.y - unit.y, best.x - unit.x),
+        swordLen: unit.swordLen, kind: 'attack',
+        sweepDeg: P.sweepDeg, swingFrames: P.swingFrames,
+      });
+    },
+  },
+};
+
+/* ------------------------------------------------------------
+   ③ 水镜·魔力共鸣（深蓝紫色和白色）：每 9 秒随机切，借晕彩的魔弹 / 激光
+   ------------------------------------------------------------
+   深浅两态的**攻击方式完全不同**，所以这里不走引擎的冷却分发
+   （那个冷却时长是写在 trigger 里的常量，换色换不了它），
+   而是自己在 onThink 里记一个计时器：
+     · 深蓝紫：每 3 秒一发魔弹（没有第三发激光）→ 9 秒周期里 4 发
+     · 白色  ：每 4 秒一发贯穿光柱           → 9 秒周期里 3 发
+   放 onThink 还有个好处：起飞期间会被自动拦掉（"空中不发动攻击"）。 */
+export const SKILL_MIRROR_BORROW = {
+  id: 'jianqing_mirror_borrow',
+  name: '水镜·魔力共鸣（深蓝紫与白）',
+  desc: '每九秒切换一次水镜的颜色：深蓝紫色时获得晕彩的魔弹（深紫、没有激光），' +
+        '白色时获得魔弹中的激光攻击能力（白色）。',
+  descDetail: `每 ${JIANQING.mirrorBorrow.cycle} 秒**随机**切一次颜色（深蓝紫 / 白），` +
+        `允许连续切到同一个颜色。\n` +
+        `· 深蓝紫色：借来晕彩的**魔弹**（深紫色特效，**没有第三发激光**）：` +
+        `伤害 ${JIANQING.mirrorBorrow.modanDmg}、弹速 ${JIANQING.mirrorBorrow.modanSpeed}、` +
+        `每 ${JIANQING.mirrorBorrow.modanCd} 秒一发 —— 一个 9 秒周期里一共 4 发。\n` +
+        `· 白色：借来魔弹的**激光**（白色特效）：伤害 ${JIANQING.mirrorBorrow.laserDmg}、` +
+        `单次持续 ${JIANQING.mirrorBorrow.laserLife} 秒、每 ${JIANQING.mirrorBorrow.laserCd} 秒一发 —— ` +
+        `一个 9 秒周期里一共 3 发。激光一端钉在见晴身上、贯穿战场，每个敌人只结算一次。`,
+  trigger: { type: 'passive' },
+  /* 持续发动型（借来的魔弹 / 激光）：被偷到时按"借用 5 秒"处理 ——
+     它连 run() 都没有，完整效果就是钩子里那套循环。 */
+  sustain: true,
+  passive(battle, unit) {
+    /* 让第 0 帧就切一次色（否则前 9 秒是"无色"，什么都射不出来） */
+    unit.flags.borrowT = JIANQING.mirrorBorrow.cycle;
+    unit.flags.borrowColor = 0;
+    unit.flags.borrowShotCd = 0;
+  },
+  /** 归还：把借用的那面水镜收起来（颜色位要清，否则缇娜身上一直挂着一圈白/紫） */
+  onUnborrow(battle, unit) {
+    unit.flags.borrowColor = 0;
+    unit.flags.borrowT = 0;
+    unit.flags.borrowShotCd = 0;
+    unit.auxKind = 0;
+  },
+  hooks: {
+    onThink(battle, unit) {
+      const P = JIANQING.mirrorBorrow;
+      /* ---- 9 秒的颜色循环 ---- */
+      unit.flags.borrowT = (unit.flags.borrowT || 0) + DT;
+      if (unit.flags.borrowT >= P.cycle) {
+        unit.flags.borrowT -= P.cycle;
+        const color = battle.rnd() < 0.5 ? 3 : 4;
+        unit.flags.borrowColor = color;
+        unit.auxKind = color;
+        battle._emit('mirrorSwitch', unit, null, color, { borrow: true, face: unit.face ?? 0 });
+      }
+      /* ---- 开火 ---- */
+      unit.flags.borrowShotCd = Math.max(0, (unit.flags.borrowShotCd || 0) - DT);
+      if (unit.flags.borrowShotCd > 0) return;
+      const color = unit.flags.borrowColor;
+      if (color !== 3 && color !== 4) return;
+      const target = battle._nearestEnemy(unit);
+      if (!target) return;
+      if (color === 3) {
+        spawnModanBullet(battle, unit, target, {
+          damage: P.modanDmg, speed: P.modanSpeed, r: P.modanR,
+          life: P.modanLife, color: P.modanColor,
+        });
+        unit.flags.borrowShotCd = P.modanCd;
+      } else {
+        spawnLaserBeam(battle, unit, target, {
+          damage: P.laserDmg, speed: P.laserSpeed, life: P.laserLife,
+          color: P.laserColor, width: P.laserWidth, len: P.laserLen,
+        });
+        unit.flags.borrowShotCd = P.laserCd;
+      }
+    },
+  },
+};
+
+/* ------------------------------------------------------------
+   ④ 起飞：累计移动 1560 单位 → 飞 3 秒
+   ------------------------------------------------------------
+   引擎侧只加了三个开关（invulnFrames / phasingFrames / noAttackFrames），
+   状态机本身在这里：
+     · 起飞：无敌 + 穿透 + 禁止攻击；移速 +150；emit('takeoff')
+     · 滞空：与任一小球重合就每帧 5 点帧伤（走 _tickDamage，
+       所以它进"帧伤"这一类：不吃羽毛的 -5，也能打进同样在飞的对手）
+     · 落地：撤掉三个开关、还原速度；emit('landing')
+   距离用"每帧位移"累加，落地后接着累加（不是清零重来 ——
+   清零会让"刚落地又得再走 1560"变成一个小惩罚，作者没这个意思）。 */
+export const SKILL_TAKEOFF = {
+  id: 'jianqing_takeoff',
+  name: '起飞',
+  desc: '移动一定距离后拍打翅膀飞到空中：虚化并变大、移动速度提高 150，持续四秒；' +
+        '期间受到的伤害减半、只与墙壁发生碰撞（可以穿过小球，每帧对重合的小球造成伤害），' +
+        '并且持续修正航向追踪敌人；其它技能照常可用。' +
+        '每次飞完，速度永久 +5、下次飞行的帧伤 +0.5（可叠加）。',
+  descDetail: `累计移动 ${JIANQING.takeoff.distance} 世界单位后起飞，滞空 ` +
+        `${JIANQING.takeoff.seconds} 秒（表现：虚化、变大，球下方出现影子 —— 近大远小）。\n` +
+        `空中：移动速度 +${JIANQING.takeoff.speedBonus}；**受到的所有伤害减半**；` +
+        `**不与任何小球发生碰撞**（只和墙壁碰），` +
+        `碰撞箱与任一小球重合时每帧造成 ${JIANQING.takeoff.frameDamage} 点伤害。\n` +
+        `**飞行中会以每秒最多 ${JIANQING.takeoff.turnPerSec}° 持续修正航向追踪最近的敌人**；` +
+        `**撞到墙壁后**则直接锁定它（空中只跟墙碰撞，不这样的话这几秒就只是随机乱撞）。\n` +
+        `空中**其它技能照常可用**（水镜三态、长剑、羽毛都能正常发动）——` +
+        `这一版不再禁止攻击。\n` +
+        `**每次飞完都会永久变强**：移动速度 +${JIANQING.takeoff.speedPerFlight}（永久、可叠加），` +
+        `之后每次飞行的帧伤 +${JIANQING.takeoff.frameDamagePerFlight}（可叠加）——` +
+        `第 1 次飞行是 ${JIANQING.takeoff.frameDamage}、第 2 次 ${JIANQING.takeoff.frameDamage + JIANQING.takeoff.frameDamagePerFlight}、` +
+        `第 3 次 ${JIANQING.takeoff.frameDamage + JIANQING.takeoff.frameDamagePerFlight * 2}…以此类推。`,
+  trigger: { type: 'passive' },
+  /* 持续发动型：被缇娜的蝙蝠偷到时"借来**立刻**起飞"（作者 2026-10 的口径），
+     滞空时长就是它自己的 seconds；落地那份"每次飞完永久 +5 移速"照给。 */
+  sustain: true,
+  passive(battle, unit) {
+    unit.flags.traveled = 0;
+    unit.flags.flyFrames = 0;
+    /* 已完成的飞行次数（驱动"速度 +5 / 帧伤 +0.5"的叠加） */
+    unit.flags.flyCount = 0;
+    unit.flags.flyDmgAcc = 0;
+  },
+  /** 借来的那一刻：不用走满 1560，直接起飞 */
+  onBorrow(battle, unit) {
+    takeOff(battle, unit);
+  },
+  /** 归还时若还悬在空中（滞空比借用时长更长时会出现），让她落地收尾。
+   *  ⚠ **不清 flyCount** —— 作者要的"获得叠加移速"就是靠它累积的，
+   *  清掉的话下一次借 ④ 就又回到 +5 起步了。 */
+  onUnborrow(battle, unit) {
+    if (unit.flags.flyFrames > 0) landFlight(battle, unit);
+  },
+  hooks: {
+    onMove(battle, unit) {
+      const P = JIANQING.takeoff;
+      /* ---------- 滞空中 ---------- */
+      if (unit.flags.flyFrames > 0) {
+        unit.flags.flyFrames--;
+        /* 持续修正航向追踪敌人：每秒最多 turnPerSec 度（作者 2026-10 的要求）。
+           引擎的 _deflectTowardEnemy 就是"每帧最多转 N 度"的旋转查表实现，
+           小数部分它自己用累加器攒（45/60 = 0.75 度/帧，不会因为取整而丢失）。 */
+        if (P.turnPerSec > 0) battle._deflectTowardEnemy(unit, P.turnPerSec * DT);
+        /* 与任一小球重合 → 帧伤（友军不算：那属于"自己人撞自己人"）。
+           伤害 = 基础 + 已完成飞行次数 × 每次叠加（作者 2026-10 的新机制）。
+           ⚠ 0.5 这种小数**不能直接交给引擎**：伤害与 HP 都是整数，
+           `_scaledDamage` 会先 round 一次（5.5 → 6），叠几层就偏了。
+           所以按"回血余数"那一套：攒够 1 点才真的结算一次，
+           平均下来严格等于 5.5 / 帧（表现上是 5、6 交替）。 */
+        const per = (P.frameDamage + (unit.flags.flyCount || 0) * P.frameDamagePerFlight)
+          * (unit.damageMul ?? 1);
+        const r2 = unit.r;
+        for (const o of battle.units) {
+          if (o === unit || !o.alive || o.team === unit.team) continue;
+          const dx = o.x - unit.x, dy = o.y - unit.y;
+          const rr = r2 + o.r;
+          if (dx * dx + dy * dy >= rr * rr) continue;
+          unit.flags.flyDmgAcc = (unit.flags.flyDmgAcc || 0) + per;
+          const whole = Math.floor(unit.flags.flyDmgAcc);
+          if (whole <= 0) continue;
+          unit.flags.flyDmgAcc -= whole;
+          battle._tickDamage(unit, o, whole, 'fly', null);
+        }
+        if (unit.flags.flyFrames === 0) landFlight(battle, unit);
+        return;
+      }
+      /* ---------- 累计移动距离 ---------- */
+      /* ⚠ 只统计**没在飞的时候**的位移，而且**起飞那一刻清零**。
+         不清零的话触发条件永远成立（累计量还在 1560 以上）——
+         落地当帧就再次起飞，表现成"一直飞在天上"（作者实测报的就是这个）。
+         清零 + 飞行中不计 = 每次都要老老实实再走满 1560。 */
+      const step = Math.hypot(unit.vx, unit.vy) * DT / SCALE;
+      unit.flags.traveled = (unit.flags.traveled || 0) + step;
+      if (unit.flags.traveled < P.distance) return;
+      takeOff(battle, unit);
+    },
+  },
+};
+
+/** 起飞（走满距离触发、或借来的那一刻直接调用）。
+ *  抽成函数是因为"借来的 ④"要跳过距离条件直接起飞 ——
+ *  否则借 5 秒里她还在慢慢走路，等于什么都没发生。 */
+function takeOff(battle, unit) {
+  const P = JIANQING.takeoff;
+  unit.flags.traveled = 0;
+  const frames = Math.round(P.seconds / DT);
+  unit.flags.flyFrames = frames;
+  /* 空中只与墙壁碰撞（穿透），受到的伤害按倍率减半（作者：免疫 → 减半）。
+     **不再**设 invulnFrames / noAttackFrames —— 那两条是上一版的口径，
+     现在的口径是"能正常使用其它所有技能、只是少挨点打"。 */
+  unit.phasingFrames = frames;
+  unit.dmgTakeMul = P.damageTakenMul;
+  unit.dmgTakeMulFrames = frames;
+  /* 撞墙后直接朝最近的敌人（飞行中只与墙碰撞，不这样的话就是随机乱撞） */
+  unit.wallHoming = !!P.wallHoming;
+  /* 空中转向限速：引擎的全局微转向（设置里默认 30°/秒）会和技能自己的
+     45°/秒**叠加**，实测变成 75°/秒 —— 与"每秒最多 45°"不符。
+     这里登记上限，由引擎在 onMove 之后统一钳住（撞墙的瞬间锁定不受限）。 */
+  unit.turnCapDegPerSec = P.turnPerSec;
+  unit.speedBonus = (unit.speedBonus || 0) + P.speedBonus;
+  battle.refreshSpeed(unit);
+  battle._emit('takeoff', unit, null, P.seconds);
+}
+
+/** 落地：撤掉"穿透 + 减伤 + 转向限速"，还原那份**临时**的移速加成，
+ *  并结算"每次飞完永久 +5 移速 / 下次帧伤 +0.5"的成长。 */
+function landFlight(battle, unit) {
+  const P = JIANQING.takeoff;
+  unit.flags.flyFrames = 0;
+  unit.phasingFrames = 0;
+  unit.dmgTakeMul = 1;
+  unit.dmgTakeMulFrames = 0;
+  unit.wallHoming = false;
+  unit.turnCapDegPerSec = 0;
+  unit.speedBonus = (unit.speedBonus || 0) - P.speedBonus;
+  /* ---------- 每次飞行之后的永久成长 ----------
+     作者 2026-10：「每次起飞过后，速度永久加 5，下次起飞的帧伤增加 0.5，可叠加」。
+     在**落地**结算：本次飞行用的还是旧数值，成长留给下一次 ——
+     这才对得上"下次起飞的帧伤增加 0.5"。
+     借来的 ④ 也照给（作者："且获得叠加移速"）：所以这份 +5 不会被归还撤掉。 */
+  unit.flags.flyCount = (unit.flags.flyCount || 0) + 1;
+  unit.speedBonus = (unit.speedBonus || 0) + P.speedPerFlight;
+  battle.refreshSpeed(unit);
+  battle._emit('flyUpgrade', unit, null, unit.flags.flyCount, {
+    speedStep: P.speedPerFlight,
+    frameDamage: P.frameDamage + unit.flags.flyCount * P.frameDamagePerFlight,
+  });
+  battle._emit('landing', unit, null, 0);
+}
+
+/* ------------------------------------------------------------
+   ⑤ 精灵变身：装备即永久生效（作者确认）
+   ------------------------------------------------------------
+   "大小变为目前的一半"用的是 u.r —— 这个项目的铁律是**看到的多大判定就多大**，
+   所以判定半径与显示半径一起减半（渲染层读的就是 u.r）。
+   减半是"变小"，不会破坏碰撞网格的单元尺寸（那个按最大半径定的），
+   所以不需要动 broad-phase。
+   "造成的所有伤害减半"走 damageMul（引擎里所有伤害出口都乘它），
+   ② 的长剑长度另外跟着 swordBase 一起减半。 */
+export const SKILL_TRANSFORM = {
+  id: 'jianqing_transform',
+  name: '精灵变身',
+  desc: '见晴变成精灵形态：体型变为一半、移动速度提高 50，但造成的所有伤害减半，' +
+        '猩红长剑的长度也减半。',
+  descDetail: `装备即生效（永久）：\n` +
+        `· 体型变为 ${JIANQING.transform.sizeMul * 100}%（判定与显示一起变，长剑也随之减半）；\n` +
+        `· 移动速度 +${JIANQING.transform.speedBonus}；\n` +
+        `· 造成的**所有**伤害 ×${JIANQING.transform.damageMul} —— 碰撞、魔弹、激光、长剑、` +
+        `连空中那 5 点帧伤都算。`,
+  trigger: { type: 'passive' },
+  /* 持续发动型：被偷到时借缇娜 5 秒（作者 2026-10 的口径）。
+     注意这对缇娜**是削弱**：她的伤害也会 ×0.7 —— 但她体型变小、移速 +55。 */
+  sustain: true,
+  /** 被动会把体型 / 伤害倍率真改掉，想**原样**还回去就必须在它跑之前先记一份 */
+  prepareBorrow(battle, unit) {
+    unit.flags.preForm = { r: unit.r, damageMul: unit.damageMul ?? 1 };
+  },
+  passive(battle, unit) {
+    const P = JIANQING.transform;
+    unit.smallForm = true;
+    /* 半径是定点数（×SCALE），所以直接对半砍 */
+    unit.r = Math.max(1, Math.round(unit.r * P.sizeMul));
+    unit.speedBonus = (unit.speedBonus || 0) + P.speedBonus;
+    battle.refreshSpeed(unit);
+    unit.damageMul = (unit.damageMul ?? 1) * P.damageMul;
+    /* 长剑长度跟着体型走（② 的被动可能还没跑，所以两边都要判一手） */
+    if (unit.swordBase) unit.swordLen = unit.swordBase * P.swordMul;
+  },
+  /** 归还：把变身整个撤掉（体型、移速、伤害倍率、剑长都回到借用前的样子） */
+  onUnborrow(battle, unit) {
+    const P = JIANQING.transform;
+    const s = unit.flags.preForm;
+    if (s) {
+      unit.r = s.r;
+      unit.damageMul = s.damageMul;
+      unit.flags.preForm = null;
+    }
+    unit.smallForm = false;
+    unit.speedBonus = (unit.speedBonus || 0) - P.speedBonus;
+    /* 剑长：借用期间被 ×0.6 过，还回去时按"没变身"的长度算 */
+    if (unit.swordBase) unit.swordLen = unit.swordBase;
+    battle.refreshSpeed(unit);
+  },
+};
+
+/* ------------------------------------------------------------
+   ⑥ 我很可爱：每掉 300 血发一根追踪羽毛
+   ------------------------------------------------------------
+   羽毛：追踪（homing）+ 撞墙反弹（bounces）+ 速度 250。
+   命中后果（作者确认）：**移速减半只持续 3 秒**，而**减伤是叠加的、本局永久**：
+     · 移速减半：写 speedMul + speedMulFrames，3 秒后引擎自己还原；
+     · 碰撞伤害 -5、技能伤害 -5：写 meleePenalty / skillPenalty，
+       由 _damage 在结算时扣（一处覆盖所有伤害来源），**帧伤不减**。
+   "每下降 300 血"用累计受伤量算，余数留着（掉了 500 血就是"发一根、余 200"）。 */
+export const SKILL_FEATHER = {
+  id: 'jianqing_feather',
+  name: '我很可爱',
+  desc: '每当见晴的生命值下降 300 时，发射一根持续追踪、可以被墙壁反弹的羽毛；' +
+        '被羽毛命中的小球移动速度减半（3 秒），碰撞伤害与技能伤害各降低 5 点（可叠加）。',
+  descDetail: `每累计受到 ${JIANQING.feather.hpStep} 点伤害就发射一根羽毛` +
+        `（速度 ${JIANQING.feather.speed}，持续追踪最近的敌人，可以被墙壁反弹 ` +
+        `${JIANQING.feather.bounces} 次）。\n` +
+        `被羽毛命中的小球：\n` +
+        `· 移动速度减半，持续 ${JIANQING.feather.slowSeconds} 秒（再次命中只是刷新这 3 秒）；\n` +
+        `· **造成的**碰撞伤害 -${JIANQING.feather.meleeMinus}、技能伤害 -${JIANQING.feather.skillMinus}，` +
+        `可以叠加、本局永久（每一下都扣，最低扣到 1 点为止）；\n` +
+        `· 每帧持续伤害（帧伤）不受影响 —— 作者明确排除。`,
+  trigger: { type: 'passive' },
+  passive(battle, unit) {
+    unit.flags.featherAcc = 0;
+  },
+  /** 被蝙蝠偷到时只"放一次" —— 就是**立刻发一根羽毛**（作者 2026-10 的口径）。
+   *  对见晴自己没有任何影响：她的 trigger 是 passive，
+   *  而引擎只按 cooldown / onWall / onHit / onHpBelow / onHits 分发 run()。 */
+  run({ battle, unit }) {
+    fireFeather(battle, unit);
+    return true;
+  },
+  hooks: {
+    onDamaged(battle, unit, ctx) {
+      const P = JIANQING.feather;
+      const amount = (ctx && ctx.amount) || 0;
+      if (!(amount > 0)) return;
+      unit.flags.featherAcc = (unit.flags.featherAcc || 0) + amount;
+      let fired = 0;
+      while (unit.flags.featherAcc >= P.hpStep && fired < 8) {
+        unit.flags.featherAcc -= P.hpStep;
+        fired++;
+        fireFeather(battle, unit);
+      }
+    },
+  },
+};
+
+/** 发一根羽毛（⑥ 的弹体：追踪 + 反弹 + 命中挂减益） */
+function fireFeather(battle, unit) {
+  const P = JIANQING.feather;
+  const target = battle._nearestEnemy(unit);
+  /* 没有敌人也要发（朝着当前朝向飞出去）—— 作者说的是"每当生命值下降 300 就发射"，
+     没有"必须有目标"这个前提。玩家操控时初始方向跟鼠标（之后它自己追踪）。 */
+  const aim = target ? battle.aimUnit(unit, target) : null;
+  const ang = aim
+    ? Math.atan2(aim.uy, aim.ux)
+    : ((unit.face ?? 0) * Math.PI) / 180;
+  const spd = P.speed * SCALE;
+  battle._spawnProjectile({
+    kind: 'aura', tag: 'feather', owner: unit,
+    feather: true,                       // 进快照的 kind=4（渲染层据此画羽毛）
+    x: unit.x, y: unit.y,
+    vx: Math.round(Math.cos(ang) * spd), vy: Math.round(Math.sin(ang) * spd),
+    damage: 0,                           // 羽毛本身不造成伤害，只挂减益
+    radius: Math.round(P.r * SCALE),
+    life: P.life, color: P.color,
+    bounces: P.bounces,
+    homing: target ? { targetId: target.id, turnPerSec: P.turnPerSec } : null,
+    onHit: (b, from, hit) => {
+      if (!hit) return;
+      applyFeatherDebuff(b, hit);
+      b._emit('featherHit', from, hit, 0, { px: hit.x / SCALE, py: hit.y / SCALE });
+    },
+  });
+}
+
+/** 羽毛命中后的减益（速度减半 3 秒 + 减伤永久叠加）。
+ *  **导出**是为了让诊断能调它 —— 测试里自己再抄一份减益逻辑的话，
+ *  真正的那份写错了也测不出来（测试会测自己抄的那份）。 */
+export function applyFeatherDebuff(battle, target) {
+  const P = JIANQING.feather;
+  target.meleePenalty = (target.meleePenalty || 0) + P.meleeMinus;
+  target.skillPenalty = (target.skillPenalty || 0) + P.skillMinus;
+  /* 速度减半：只刷新时长，**不叠加成 1/4** */
+  target.speedMul = P.slowMul;
+  target.speedMulFrames = Math.round(P.slowSeconds / DT);
+  battle.refreshSpeed(target);
+}
+
+/** 这个技能在**玩家操控**时是不是"按键发动"的主动技能。
+ *
+ *  作者 2026-10 的口径：主动攻击技能改为按键触发（原来的间隔变成技能冷却），
+ *  被动技能照旧自动触发（裁光、见晴的变色…）。
+ *  在本项目里这条规则正好落在"触发方式"上：
+ *    · 冷却触发 = 原来"每 N 秒自己放一次"的主动技能 → 按键
+ *    · 撞墙 / 被动 / 掉血阈值 / 撞击触发 = 被动技 → 自动
+ *  例外用 `auto: true` 标出来（见晴①变色：内部是冷却，但按作者口径算被动）。
+ */
+export function isManualSkill(sk) {
+  return !!(sk && sk.trigger && sk.trigger.type === 'cooldown' && !sk.auto);
+}
+
+/** 玩家操控时"要占一个技能键"的技能 id 列表 —— 顺序 = 按键顺序。
+ *  引擎只按这个列表分发（见 core.js 的 _runSkills），
+ *  界面也用它生成技能栏与按键提示，两边**同一份口径**。 */
+export function manualSkillIds(unit) {
+  const out = [];
+  for (const id of (unit && unit.skills) || []) {
+    const sk = getSkill(id);
+    if (isManualSkill(sk)) out.push(id);
+  }
+  return out;
+}
+
 export const SKILLS = {
   [SKILL_TINA_SUCK.id]: SKILL_TINA_SUCK,
   [SKILL_TINA_BAT.id]: SKILL_TINA_BAT,
@@ -1461,6 +2411,13 @@ export const SKILLS = {
   [SKILL_AIM.id]: SKILL_AIM,
   [SKILL_CHUNJING.id]: SKILL_CHUNJING,
   [SKILL_TOP.id]: SKILL_TOP,
+  /* 见晴（白水仙） */
+  [SKILL_MIRROR_DEF.id]: SKILL_MIRROR_DEF,
+  [SKILL_MIRROR_SWORD.id]: SKILL_MIRROR_SWORD,
+  [SKILL_MIRROR_BORROW.id]: SKILL_MIRROR_BORROW,
+  [SKILL_TAKEOFF.id]: SKILL_TAKEOFF,
+  [SKILL_TRANSFORM.id]: SKILL_TRANSFORM,
+  [SKILL_FEATHER.id]: SKILL_FEATHER,
 };
 
 export function getSkill(id) {

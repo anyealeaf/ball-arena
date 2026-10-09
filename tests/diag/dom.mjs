@@ -1,6 +1,7 @@
 /* Inspect the real DOM structure of the battle screen and the widths that
    the code would read. Catches "parentElement is not what you think" bugs.
    (ASCII only.) */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { parseHTML } from 'linkedom';
 import { readFileSync } from 'node:fs';
 

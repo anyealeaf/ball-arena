@@ -6,12 +6,14 @@
          复活规则、时限判定、以及最关键的确定性。
    ============================================================ */
 
+import './lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle, SNAP_STRIDE } from '../js/core.js';
 import {
-  SPECIES_BY_ID, DEFAULT_RULES, makeUnitStats, SCALE, BALL_SCALE,
+  SPECIES_BY_ID, DEFAULT_RULES, makeUnitStats, SCALE, BALL_SCALE, DT,
   MAX_SKILLS_PER_UNIT, defaultSkillsFor, normalizeSkills
 } from '../js/balls.js';
 import { ARENA_BY_ID, ARENAS, effectiveShape, pointInZone } from '../js/arenas.js';
+import { getSkill, JIANQING, YUNCAI, TAOYAO } from '../js/skills.js';
 
 let pass = 0, fail = 0;
 const results = [];
@@ -21,14 +23,31 @@ function check(name, cond, detail = '') {
   else { fail++; results.push(`  ❌ ${name}${detail ? '  — ' + detail : ''}`); }
 }
 
-function mkConfig({ teams, arenaId = 'rect', rules = {}, playerSlot = null, seed = 1, sizeScale = 1 }) {
+function mkConfig({ teams, arenaId = 'rect', arena = null, rules = {}, playerSlot = null, seed = 1, sizeScale = 1 }) {
   return {
     teams: teams.map(units => ({ units: units.map(id => ({ stats: makeUnitStats(id) })) })),
-    arena: ARENA_BY_ID[arenaId],
+    /* arena 直接给对象时优先用它 —— 用来就地造一个"带区域效果 / 会旋转"的场地。
+       2026-10 作者要求"场地只保留几个几何图形的基本场地"，目录里那些特殊场地
+       被删掉了，但**引擎能力**（zones / effects.rotationSpeedDeg）都还在，
+       所以这里合成一个来继续守着这些机制，而不是把断言一起删掉。 */
+    arena: arena || ARENA_BY_ID[arenaId],
     sizeScale,
     rules: { ...DEFAULT_RULES, ...rules },
     playerSlot,
     seed
+  };
+}
+
+/* 合成场地：给任意基础场地挂上一块"持续伤害区" / "旋转" —— 测试专用 */
+function withZone(baseId, zone) {
+  const a = ARENA_BY_ID[baseId];
+  return { ...a, id: a.id + '_test_zone', zones: [zone] };
+}
+function withRotation(baseId, degPerSec) {
+  const a = ARENA_BY_ID[baseId];
+  return {
+    ...a, id: a.id + '_test_rot', shape: { ...a.shape, rotate: true },
+    effects: { ...(a.effects || {}), rotationSpeedDeg: degPerSec }
   };
 }
 
@@ -101,7 +120,7 @@ console.log('\n【3】同队伍不互相造成伤害');
 
 /* ---------- 4. 场地约束：小球不得跑出场外 ---------- */
 console.log('\n【4】场地边界约束');
-for (const arenaId of ['rect', 'circle', 'octagon', 'triangle', 'diamond', 'shrink_ring', 'chaos']) {
+for (const arenaId of ['rect', 'circle', 'octagon', 'hexagon', 'triangle', 'diamond', 'decagon', 'shrink_ring']) {
   const cfg = mkConfig({ teams: [['test', 'test', 'test'], ['test', 'test', 'test']], arenaId, seed: 11 });
   const b = new Battle(cfg);
   let outside = 0, worst = 0;
@@ -323,8 +342,16 @@ console.log('\n【7】比赛时限');
 /* ---------- 8. 场地特效生效 ---------- */
 console.log('\n【8】场地特殊效果');
 {
-  // 熔心斗场：中央持续灼烧
-  const cfg = mkConfig({ teams: [['test'], ['test']], arenaId: 'lava_center', seed: 21 });
+  /* 区域持续伤害：具体场地已按作者要求删除，这里**就地合成**一块灼烧区，
+     保证"区域伤害"这条机制仍然被测到（不然删场地就等于删覆盖）。 */
+  const lava = {
+    id: 'test_lava', name: '岩浆', type: 'damage', dps: 55,
+    shape: { kind: 'circle', cx: 360, cy: 220, r: 85 },
+    color: 'rgba(220,80,40,0.28)', edge: 'rgba(220,80,40,0.65)'
+  };
+  const cfg = mkConfig({
+    teams: [['test'], ['test']], arena: withZone('rect', lava), seed: 21
+  });
   const b = new Battle(cfg);
   b.runToEnd();
   const zoneHits = b.events.filter(e => e.kind === 'zone').length;
@@ -342,8 +369,8 @@ console.log('\n【8】场地特殊效果');
     `0 秒 ${sizeEarly.toFixed(0)} → 20 秒 ${sizeLate.toFixed(0)}`);
 }
 {
-  // 旋转场地：顶点位置应当随时间改变
-  const a = ARENA_BY_ID['rotating_square'];
+  // 旋转场地：顶点位置应当随时间改变（同样是就地合成，见 withRotation）
+  const a = withRotation('octagon', 9);
   const p0 = effectiveShape(a, 0).points[0];
   const p5 = effectiveShape(a, 5).points[0];
   check('旋转场地顶点随时间变化', p0[0] !== p5[0] || p0[1] !== p5[1],
@@ -355,7 +382,7 @@ console.log('\n【9】确定性：同配置必然得到同一场战斗');
 {
   const cfg = mkConfig({
     teams: [['test', 'test_lowhp', 'test_charge'], ['test_heavy', 'test', 'test']],
-    arenaId: 'chaos', seed: 20260930
+    arenaId: 'octagon', seed: 20260930
   });
   const runs = [];
   for (let i = 0; i < 3; i++) {
@@ -493,6 +520,261 @@ console.log('\n【14c】撞墙偏转朝敌人修正');
   }
   check('撞墙时确实发生了朝敌偏转', turned > 0, `${turned} 次偏转，累计 ${sum.toFixed(0)} 度`);
   check('偏转角不超过设定上限', overLimit === 0, `上限 ${limit} 度，越界 ${overLimit} 次`);
+}
+
+/* ---------- 14d. 技能型转向限速（turnCapDegPerSec） ---------- */
+console.log('\n【14d】turnCapDegPerSec：一帧内所有转向来源合计不超过上限');
+{
+  /** A 朝 +x 走、B 钉在 A 正上方 100（差 90°），跑 30 帧量 A 的航向变化。
+   *  规则里的"持续微转向"故意开到 90°/秒（比上限大一倍），
+   *  就是为了验证"引擎微转向 + 技能转向"不会叠加着突破上限。 */
+  const runOne = (cap) => {
+    const cfg = mkConfig({
+      teams: [['test'], ['test']], seed: 7, arenaId: 'rect',
+      rules: { steerDegPerSec: 90, wallDeflectDeg: 0 },
+    });
+    const b = new Battle(cfg);
+    const a = b.units[0], t = b.units[1];
+    a.x = Math.round(200 * SCALE); a.y = Math.round(220 * SCALE);
+    a.turnCapDegPerSec = cap;
+    a.vx = Math.round(120 * SCALE); a.vy = 0;
+    const speed0 = Math.hypot(a.vx, a.vy);
+    const before = Math.atan2(a.vy, a.vx);
+    for (let i = 0; i < 30; i++) {
+      t.x = a.x; t.y = a.y - Math.round(100 * SCALE);
+      b.step();
+    }
+    let d = Math.abs(Math.atan2(a.vy, a.vx) - before) * 180 / Math.PI;
+    if (d > 180) d = 360 - d;
+    return { turned: d, speed: Math.hypot(a.vx, a.vy), speed0 };
+  };
+  const free = runOne(0);
+  const capped = runOne(45);
+  check('不设上限时按规则转速走（90°/秒 → 30 帧约 45°）',
+    free.turned > 40 && free.turned < 50, `${free.turned.toFixed(1)}°`);
+  check('设了上限就压到上限（45°/秒 → 30 帧约 22.5°）',
+    Math.abs(capped.turned - 22.5) <= 1.5, `${capped.turned.toFixed(1)}°`);
+  check('限速只改方向、不改速率',
+    Math.abs(capped.speed - capped.speed0) / SCALE <= 0.005,
+    `${(capped.speed0 / SCALE).toFixed(3)} → ${(capped.speed / SCALE).toFixed(3)}`);
+}
+
+/* ---------- 14e. 借来的技能（grantSkill / revokeSkill） ---------- */
+console.log('\n【14e】借来的技能：挂上 / 续时长 / 到期摘干净');
+{
+  /* 借的是见晴的②（常驻长剑）：它有 passive（移速 +10、给一柄剑）与
+     onThink 钩子 —— 正好一次验三件事：被动跑没跑、钩子挂没挂、归还撤没撤。 */
+  const SK = getSkill('jianqing_mirror_sword');
+  const cfg = mkConfig({ teams: [['test'], ['test']], seed: 5 });
+  const b = new Battle(cfg);
+  const u = b.units[0];
+  const baseSpeed = u.speed / SCALE;
+  const hooks0 = (u.hooks.onThink || []).length;
+
+  check('借之前：列表里没有它、也没挂它的钩子',
+    !b._skillIdsOf(u).includes(SK.id), b._skillIdsOf(u).join(',') || '（空）');
+  check('grantSkill 返回 true', b.grantSkill(u, SK.id, 1) === true);
+  check('借来的技能进了"此刻能用"的列表',
+    b._skillIdsOf(u).includes(SK.id), b._skillIdsOf(u).join(','));
+  check('被动真的跑了（移速 +' + JIANQING.mirrorSword.speedBonus + '、剑长 > 0）',
+    u.speed / SCALE === baseSpeed + JIANQING.mirrorSword.speedBonus && u.swordLen > 0,
+    `移速 ${baseSpeed} → ${u.speed / SCALE}、剑长 ${u.swordLen}`);
+  check('钩子挂上了', (u.hooks.onThink || []).length === hooks0 + 1,
+    `${hooks0} → ${(u.hooks.onThink || []).length}`);
+  /* 再借一次 = 续时长，**不能把被动再跑一遍**（否则移速会叠两层） */
+  b.grantSkill(u, SK.id, 1);
+  check('重复借只续时长，被动不叠加（移速不变）',
+    u.speed / SCALE === baseSpeed + JIANQING.mirrorSword.speedBonus,
+    String(u.speed / SCALE));
+  check('重复借时钩子也只挂一份', (u.hooks.onThink || []).length === hooks0 + 1,
+    String((u.hooks.onThink || []).length));
+  check('借一个不存在的技能 → false', b.grantSkill(u, 'no_such_skill', 1) === false);
+  check('归还一个没借过的技能 → false', b.revokeSkill(u, 'no_such_skill') === false);
+
+  for (let i = 0; i < Math.round(1 / DT) + 3; i++) b.step();
+  check('到期由引擎自动归还（borrow 清空）', !u.borrow || !u.borrow[SK.id],
+    u.borrow ? Object.keys(u.borrow).join(',') : '空');
+  check('归还后钩子摘干净（别人身上的钩子不受影响）',
+    (u.hooks.onThink || []).length === hooks0, String((u.hooks.onThink || []).length));
+  check('归还后被动撤回（移速回到原值、剑长归 0）',
+    Math.abs(u.speed / SCALE - baseSpeed) < 0.01 && u.swordLen === 0,
+    `移速 ${u.speed / SCALE}、剑长 ${u.swordLen}`);
+  check('归还事件成对出现（borrow / borrowEnd）',
+    b.events.filter(e => e.type === 'borrow').length === 2 &&
+    b.events.filter(e => e.type === 'borrowEnd').length === 1,
+    `${b.events.filter(e => e.type === 'borrow').length} / ${b.events.filter(e => e.type === 'borrowEnd').length}`);
+}
+
+/* ---------- 14f. 玩家操控 ---------- */
+console.log('\n【14f】玩家操控：八向移动 / 开局无冲量 / 按键发动 / 鼠标瞄准');
+{
+  /** 造一局"玩家操控"：玩家球用指定球种与技能，对手固定是个不动的木桩 */
+  const mkPlayer = (speciesId, skills, opts = {}) => new Battle({
+    teams: [
+      { units: [{ stats: makeUnitStats(speciesId, skills) }] },
+      { units: [{ stats: makeUnitStats(opts.foeId || 'dummy', opts.foeSkills || []) }] },
+    ],
+    arena: ARENA_BY_ID.rect,
+    sizeScale: 1,
+    rules: { ...DEFAULT_RULES, timeLimit: 0, ...(opts.rules || {}), playerControl: true },
+    playerSlot: opts.playerSlot === undefined ? null : opts.playerSlot,
+    seed: 5,
+  });
+  const shotAngles = (b, tag) => b.projectiles.filter(p => p.tag === tag)
+    .map(p => Math.atan2(p.vy, p.vx) * 180 / Math.PI);
+
+  /* ---- 默认操控目标、开局不受冲量 ---- */
+  const b0 = mkPlayer('yuncai', ['yuncai_modan']);
+  const p0 = b0.units[0];
+  check('默认操控蓝色方（0 号队）的第一个小球',
+    p0.isPlayer === true && b0.playerIdx === 0, `playerIdx=${b0.playerIdx}`);
+  check('玩家小球开局不受冲量（速度 0）', p0.vx === 0 && p0.vy === 0, `${p0.vx},${p0.vy}`);
+  /* ⚠ 木桩是 immovable，它的速度本来就是 0（用它验不出"别人还有冲量"），
+     所以这条另起一局、拿一个正常球种当对手。 */
+  {
+    const bf = mkPlayer('yuncai', [], { foeId: 'test' });
+    check('同一局里其他小球照旧有开局冲量',
+      Math.hypot(bf.units[1].vx, bf.units[1].vy) > 0,
+      `${(Math.hypot(bf.units[1].vx, bf.units[1].vy) / SCALE).toFixed(0)}`);
+  }
+  check('开局方向角仍然算出来了（渲染朝向用）',
+    typeof p0.spawnAngle === 'number' && p0.spawnAngle >= 0 && p0.spawnAngle < 360,
+    String(p0.spawnAngle));
+
+  /* ---- 八向移动 ---- */
+  {
+    const dirOf = (dx, dy, frames = 40) => {
+      const b = mkPlayer('yuncai', []);
+      const u = b.units[0];
+      for (let i = 0; i < frames; i++) b.step({ dx, dy, fire: [] });
+      return { ang: Math.atan2(u.vy, u.vx) * 180 / Math.PI, spd: Math.hypot(u.vx, u.vy) / SCALE };
+    };
+    const east = dirOf(1, 0), ne = dirOf(1, -1), north = dirOf(0, -1), sw = dirOf(-1, 1);
+    check('按住 D：向东、速率 = 球速', Math.abs(east.ang) < 1 && Math.abs(east.spd - 120) < 1,
+      `${east.ang.toFixed(1)}° / ${east.spd.toFixed(1)}`);
+    check('按住 W+D：东北 45°（八向）', Math.abs(ne.ang + 45) < 1.5 && Math.abs(ne.spd - 120) < 1,
+      `${ne.ang.toFixed(1)}° / ${ne.spd.toFixed(1)}`);
+    check('按住 W：正北', Math.abs(north.ang + 90) < 1.5, `${north.ang.toFixed(1)}°`);
+    check('按住 S+A：西南 135°', Math.abs(sw.ang - 135) < 1.5, `${sw.ang.toFixed(1)}°`);
+
+    /* 松开很快停下（作者口径：约 0.13 秒） */
+    const bs = mkPlayer('yuncai', []);
+    const us = bs.units[0];
+    for (let i = 0; i < 20; i++) bs.step({ dx: 1, dy: 0, fire: [] });
+    for (let i = 0; i < 20; i++) bs.step({ dx: 0, dy: 0, fire: [] });
+    check('松开方向键后很快停下（20 帧内速度归零）',
+      Math.hypot(us.vx, us.vy) / SCALE < 1, `${(Math.hypot(us.vx, us.vy) / SCALE).toFixed(2)}`);
+
+    /* 不传 input（例如回放 / 全自动）时不去干预玩家球 */
+    const b2 = mkPlayer('yuncai', []);
+    for (let i = 0; i < 30; i++) b2.step();
+    check('没有 input 时不干预玩家球的速度',
+      b2.units[0].vx === 0 && b2.units[0].vy === 0, `${b2.units[0].vx},${b2.units[0].vy}`);
+  }
+
+  /* ---- 主动技能改成按键发动 ---- */
+  {
+    /* ⚠ 魔弹技能"累计命中两次后下一发变激光"，所以要把两种弹道都算上 ——
+       只数 modan 的话会看到一段 4 秒的空档（第三发被激光顶掉了）。 */
+    const count = b => b.events.filter(e => e.type === 'shoot' &&
+      (e.tag === 'modan' || e.tag === 'laser')).length;
+    const idle = mkPlayer('yuncai', ['yuncai_modan']);
+    for (let i = 0; i < 60 * 4; i++) idle.step({ dx: 0, dy: 0, fire: [] });
+    check('不按键就一发都不放（以前每 2 秒会自动放）', count(idle) === 0, `${count(idle)} 发`);
+
+    const fire = mkPlayer('yuncai', ['yuncai_modan']);
+    fire.step({ dx: 0, dy: 0, fire: ['yuncai_modan'] });
+    check('按下对应按键就立刻放一发', count(fire) === 1, `${count(fire)} 发`);
+
+    /* 原间隔变成冷却：按住不放也只是"按冷却节奏连发" */
+    const held = mkPlayer('yuncai', ['yuncai_modan']);
+    const marks = [];
+    for (let i = 0; i < 60 * 10; i++) {
+      held.step({ dx: 0, dy: 0, fire: ['yuncai_modan'] });
+      const n = count(held);
+      if (!marks.length || n > marks[marks.length - 1].n) marks.push({ n, f: i });
+    }
+    const cd = YUNCAI.modan.cd;
+    const diffs = marks.slice(1).map((m, i) => (m.f - marks[i].f) * DT);
+    check(`按住不放 = 按冷却节奏连发（冷却 ${cd} 秒）`,
+      marks.length >= 4 && diffs.every(d => Math.abs(d - cd) <= 0.1),
+      `共 ${marks.length} 发，间隔 ${diffs.map(d => d.toFixed(2)).join('/')}`);
+
+    const wrong = mkPlayer('yuncai', ['yuncai_modan']);
+    for (let i = 0; i < 60 * 3; i++) wrong.step({ dx: 0, dy: 0, fire: ['taoyao_rong'] });
+    check('按到别的球的技能键 → 什么都不放', count(wrong) === 0, `${count(wrong)} 发`);
+  }
+
+  /* ---- 鼠标决定弹道初始方向 ---- */
+  {
+    const b = mkPlayer('yuncai', ['yuncai_modan']);
+    const u = b.units[0], foe = b.units[1];
+    foe.x = u.x + Math.round(300 * SCALE); foe.y = u.y;     // 敌人在正右方
+    for (let i = 0; i < 6; i++) b.step({ dx: 0, dy: 0, fire: [] });
+    b.step({ dx: 0, dy: 0, fire: ['yuncai_modan'], aimX: u.x / SCALE - 100, aimY: u.y / SCALE });
+    const a1 = shotAngles(b, 'modan')[0];
+    const sh = b.projectiles.find(p => p.tag === 'modan');
+    check('弹道朝鼠标（敌人在右、鼠标在左 → 往左飞 180°）',
+      a1 != null && Math.abs(Math.abs(a1) - 180) < 1, `${(a1 ?? NaN).toFixed(1)}°`);
+    check(`弹速不受鼠标影响（仍是 ${YUNCAI.modan.speed}）`,
+      !!sh && Math.abs(Math.hypot(sh.vx, sh.vy) / SCALE - YUNCAI.modan.speed) < 1,
+      sh ? `${(Math.hypot(sh.vx, sh.vy) / SCALE).toFixed(0)}` : '-');
+
+    const b2 = mkPlayer('yuncai', ['yuncai_modan']);
+    const u2 = b2.units[0];
+    b2.units[1].x = u2.x + Math.round(300 * SCALE);
+    for (let i = 0; i < 6; i++) b2.step({ dx: 0, dy: 0, fire: [] });
+    b2.step({ dx: 0, dy: 0, fire: ['yuncai_modan'], aimX: u2.x / SCALE + 100, aimY: u2.y / SCALE - 100 });
+    const a2 = shotAngles(b2, 'modan')[0];
+    check('鼠标斜右上 → 弹道 −45°', a2 != null && Math.abs(a2 + 45) < 1, `${(a2 ?? NaN).toFixed(1)}°`);
+    /* 没给鼠标位置时退回"朝目标"（这样鼠标没动过 = 和 AI 一样） */
+    const b3 = mkPlayer('yuncai', ['yuncai_modan']);
+    const u3 = b3.units[0];
+    b3.units[1].x = u3.x + Math.round(300 * SCALE); b3.units[1].y = u3.y;
+    for (let i = 0; i < 6; i++) b3.step({ dx: 0, dy: 0, fire: [] });
+    b3.step({ dx: 0, dy: 0, fire: ['yuncai_modan'] });
+    const a3 = shotAngles(b3, 'modan')[0];
+    check('还没动过鼠标时照旧朝最近的敌人', a3 != null && Math.abs(a3) < 1, `${(a3 ?? NaN).toFixed(1)}°`);
+  }
+
+  /* ---- 鼠标让"扇形五连发"整体旋转（散开角度不变） ---- */
+  {
+    const b = mkPlayer('taoyao', ['taoyao_rong']);
+    const u = b.units[0];
+    b.units[1].x = u.x + Math.round(300 * SCALE); b.units[1].y = u.y;
+    u.flags.rongShots = TAOYAO.rong.burstEvery;    // 下一次就是五连发
+    b.step({ dx: 0, dy: 0, fire: ['taoyao_rong'], aimX: u.x / SCALE, aimY: u.y / SCALE - 100 });
+    const angles = shotAngles(b, 'arrow');
+    const mean = angles.reduce((s, a) => s + a, 0) / (angles.length || 1);
+    check('五连发整体朝鼠标方向（正上方 → −90°）',
+      angles.length === 5 && Math.abs(mean + 90) < 1.5,
+      `${angles.length} 支，平均 ${mean.toFixed(1)}°`);
+    check('散开角度保持不变（最外两支仍相差 2×burstSpread）',
+      angles.length === 5 &&
+      Math.abs((angles[4] - angles[0]) - TAOYAO.rong.burstSpread * 2 * 180 / Math.PI) < 1.5,
+      `相差 ${(angles[4] - angles[0]).toFixed(1)}°`);
+  }
+
+  /* ---- 被动 / 形态类技能照旧自动触发；弓跟着鼠标 ---- */
+  {
+    const b = mkPlayer('jianqing', ['jianqing_mirror_def']);
+    const u = b.units[0];
+    for (let i = 0; i < 60 * 2; i++) b.step({ dx: 0, dy: 0, fire: [] });
+    check('见晴①（标了 auto）不按键也会自动变色',
+      u.ringKind === 1 || u.ringKind === 2, `ringKind=${u.ringKind}`);
+    check('见晴①仍按自己的节奏走（冷却已重置，不是每帧都切）',
+      (u.skillCd['jianqing_mirror_def'] || 0) > 0,
+      `剩余 ${(u.skillCd['jianqing_mirror_def'] || 0).toFixed(2)} 秒`);
+
+    const b2 = mkPlayer('taoyao', ['taoyao_rong']);
+    const u2 = b2.units[0];
+    b2.units[1].x = u2.x + Math.round(300 * SCALE);
+    b2.step({ dx: 0, dy: 0, fire: [], aimX: u2.x / SCALE, aimY: u2.y / SCALE - 100 });
+    const snap = b2.snapshots[b2.snapshots.length - 1].data;
+    check('举弓的角度跟鼠标（快照第 14 位 = 270°）',
+      Math.abs(snap[u2.id * SNAP_STRIDE + 14] - 270) < 1.5,
+      String(snap[u2.id * SNAP_STRIDE + 14]));
+  }
 }
 
 /* ---------- 15. 碰撞后必须分开（不能粘在一起） ---------- */

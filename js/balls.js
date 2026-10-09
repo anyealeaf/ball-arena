@@ -136,9 +136,17 @@ export const SPECIES = [
        `shot` 留 null = 与 idle 同一张图，也就是作者说的"射箭的时候切换为 1"。
 
        两张弓图的原始画布宽度不同（116 / 196，拉弓那张多一支箭），
-       直接各自居中画会让弓横跳 40px。所以由 tools/make-bow-sprites.mjs
+       直接各自居中画会让弓横跳 40px。所以由 tools/make-sprites.mjs
        先把两帧按"弓臂对齐"贴到**同一块画布**上，这里拿到的两张图同尺寸同锚点。 */
     bow: {
+      /* 哪一个 castKind 用哪一套美术：
+         kind 0 = 映霞[荣] 普通，1 = 映霞[荣] 五连发，2 = 映霞[枯]。
+         两式长得完全不一样（荣是粉弓、枯是墨色花枝弓），
+         而弓的美术挂在球种上、渲染层看不出当前是哪一式 ——
+         所以由技能用 castKind 报出来，渲染层照这个表挑。 */
+      kindArt: [0, 0, 1],
+      arts: [
+      { // ---------- 荣 ----------
       idle: 'assets/characters/taoyao_bow_idle.png',
       draw: 'assets/characters/taoyao_bow_draw.png',
       shot: null,                                        // null = 同 idle
@@ -148,19 +156,21 @@ export const SPECIES = [
          弓绕这个点旋转，所以它同时决定了"球握在弓的哪个位置"。
          y 取 0.521 = 画里那支搭好的箭所在的高度，也就是搭箭点 ——
          球心必须在这一行上，否则箭会从球的旁边而不是身上射出去。 */
+      /* 下面三个几何量都由 tools/make-sprites.mjs **量出来**，不是人眼试的。
+         它同时拿荣这组值做自检（对照当初人眼调好的 0.426 / 0.0204 / 0.335）。 */
       anchor: { x: 0.4260, y: 0.5211 },
       /* bowH —— 弓的绘制高度（世界单位），宽度按原图比例。球直径是 32。
          弓是 1:4.96 的细长弓，所以这个数要比球直径大不少才看得清；
          取 140 时弓的内容宽度约 28 单位，和球差不多宽 ——
          表现为"球在弓的正中、上下各伸出一截弓臂"。 */
-      bowH: 140,
+      bowH: 100,
 
       /* nock —— 搭箭节点（那支搭好的箭的箭尾）在画布上的位置。
          五连发时，额外四根箭以这个点为轴扇形排开 —— 五根箭共用同一个箭尾。 */
-      nock: { x: 0.0204, y: 0.5211 },
+      nock: { x: 0.0051, y: 0.5211 },
       /* 箭矢长度按弓高的比例给（画里那支搭好的箭是弓高的 0.335 倍），
          这样改 bowH 时箭会跟着等比缩放，不用再调一次。 */
-      arrowLenFrac: 0.335,
+      arrowLenFrac: 0.3243,
 
       /* 五连发：在 draw 的基础上，于同一个搭箭节点扇形排布箭矢。
          这些箭是**武器的一部分**，所以跟着弓一起旋转（用弓的局部坐标系）。
@@ -172,7 +182,31 @@ export const SPECIES = [
          参数对应 TAOYAO.rong 的 burstCount / burstSpread：
            5 发 / 0.42 弧度（24.06°）→ 0°, ±12.03°, ±24.06°。
          诊断里有一条断言把这两个数钉在一起，改一边不改另一边会变红。 */
-      burst: { count: 5, spreadDeg: 24.06 }
+      burst: { count: 5, spreadDeg: 24.06 },
+      },
+
+      { // ---------- 枯 ----------
+      /* 枯的弓是墨色花枝弓，与荣完全不同的一套图。
+         它没有五连发，所以 burst 用不上（五连发是荣独有的）。
+         几何量同样由构建工具量出来：对齐偏移 38px → 画布 214×589。
+
+         **这张「平时」原图作者画反了手**：弦在右边、弓臂鼓向左边，
+         和它自己的「拉弓」那张、以及荣的两张正好相反。
+         tools/make-sprites.mjs 会在构建时把方向不对的那一帧**左右镜像**过来
+         （镜像 ≠ 转 180°：弓上下有别，转 180° 会把弓梢和握把也翻掉），
+         并在控制台把这件事报出来。所以下面这些数字是**摆正之后**量的，
+         别拿 assets/src 里的原图去核对 —— 那张是反的。 */
+      idle: 'assets/characters/taoyao_ku_bow_idle.png',
+      draw: 'assets/characters/taoyao_ku_bow_draw.png',
+      shot: null,
+      arrow: 'assets/characters/taoyao_ku_arrow.png',
+      anchor: { x: 0.5374, y: 0.5059 },
+      bowH: 100,
+      nock: { x: 0.0514, y: 0.5059 },
+      arrowLenFrac: 0.3243,
+      burst: null,
+      },
+      ],
     },
     resource: null,
     /* 数组顺序 = "默认装配"的优先级（前 3 个）。
@@ -231,98 +265,89 @@ export const SPECIES = [
     ]
   },
 
-  /* ---------- 技能测试球 ---------- */  {
-    id: 'test_skill',
-    name: '测试球·技能型',
-    color: '#c084fc',
-    hp: 1000,
-    r: 16,
-    speed: 120,
-    melee: 100,
-    reach: 0,
-    desc: '用来验证技能机制的测试球，带两个技能：' +
-          '① 每 2.5 秒自动瞄准对手发射一枚攻击力 50 的特效小球；' +
-          '② 撞到场地边界时停止移动，蓄力 2 秒后加速冲向对手（加速期间碰撞伤害 200，并把对手推远）。',
-    tags: ['测试', '技能'],
-    image: null,
-    resource: null,
-    /* 技能引用见 js/skills.js。冷却、撞墙/撞击/血量/次数等触发方式
-       都由引擎统一分发，技能本身只负责"发动时做什么"。 */
-    skills: ['test_shot', 'test_dash']
-  },
+  /* ---------- 见晴（魔法少女[白水仙]）----------
+     作者 2026-10 给的规格：**血量 1500 / 速度 120 / 碰撞伤害 30 /
+     标准体型（与晕彩一致，r = 16）**，六个技能。
 
-  /* ---------- 测试球 ---------- */
-  {
-    id: 'test',
-    name: '测试球',
-    color: '#8a94a6',
-    hp: 1000,
-    r: 16,
-    speed: 120,
-    melee: 100,          // 碰撞造成 100 伤害
-    reach: 0,
-    desc: '框架验证用的空白小球：无技能、1000 点生命、贴身碰撞造成 100 点伤害。',
-    tags: ['测试'],
-    image: null,
-    resource: null,      // 无特殊资源 —— 血条下方不会出现资源条
-    skills: []
-  },
+     她的"特殊资源"就是 ① 的护盾（水镜护盾）：白色小球在淡粉水镜下每秒 +30、
+     上限 300，受到的伤害先扣它。放进 resource 而不是新加一个字段，
+     是因为资源条本来就会画在血条下方 —— 护盾看得见，才谈得上"要不要开 ①"。
 
-  /* ---------- 演示用：带特殊资源的小球 ----------
-     存在的目的是验证「血条在上、特殊资源在下」的 HUD 布局，
-     以及资源随时间积攒的逻辑是否跑得通。技能本身留空。 */
+     贴图暂时没有（作者还没给美术），所以 sticker 为 null：
+     渲染层会退回纯色圆 + 当前水镜颜色的外圈。 */
   {
-    id: 'test_charge',
-    name: '测试球·蓄能型',
-    color: '#6d8cff',
-    hp: 1000,
-    r: 16,
+    id: 'jianqing',
+    name: '见晴',
+    color: '#cfe0ea',          // 白水仙的淡白蓝（贴图加载前的兜底色）
+    hp: 1500,
+    r: 16,                     // 标准体型：与晕彩一致
     speed: 120,
-    melee: 100,
+    melee: 30,
     reach: 0,
-    desc: '与测试球数值完全相同，但带一条「蓄能」资源条，用于验证特殊资源的显示与积攒逻辑。',
-    tags: ['测试', '资源'],
+    desc: '魔法少女[白水仙]。血量 1500、速度 120、碰撞伤害 30、标准体型；' +
+          '靠三面「水镜」切换形态（回血 / 长剑 / 借来的魔弹与激光），' +
+          '还能飞起来、变成精灵形态、掉血时射出追踪羽毛。技能共 6 个，每局最多装配 3 个。',
+    tags: ['魔法少女', '正式角色'],
     image: null,
-    resource: {
-      id: 'charge',
-      name: '蓄能',
-      max: 100,
-      init: 0,
-      gainPerSec: 12,    // 每秒自然积攒
-      gainOnHit: 6,      // 每次命中额外获得
-      color: '#4f7cff'
+    /* 小球贴图：作者 2026-10 给的「魔法少女[白水仙]（贴图）.png」，
+       已经裁成一个 282×282 的圆形头像，直接用满（cx/cy/r = 0.5）。
+       源图留在 assets/src/jianqing/ball.png。 */
+    sticker: {
+      src: 'assets/characters/jianqing_ball.png',
+      cx: 0.5, cy: 0.5, r: 0.5
     },
-    skills: []
+    /* 水镜护盾：由技能① 攒，受伤时先扣它 */
+    resource: {
+      id: 'mirror',
+      name: '水镜护盾',
+      max: 300,
+      init: 0,
+      gainPerSec: 0,   // 不随时间自动涨：只有淡粉水镜才 +30/秒（见 skills.js）
+      gainOnHit: 0,
+      color: '#f0abfc'
+    },
+    skills: [
+      'jianqing_mirror_def',     // ① 水镜·魔力共鸣（防御）
+      'jianqing_mirror_sword',   // ② 水镜·魔力共鸣（猩红色）
+      'jianqing_mirror_borrow',  // ③ 水镜·魔力共鸣（深蓝紫与白）
+      'jianqing_takeoff',        // ④ 起飞
+      'jianqing_transform',      // ⑤ 精灵变身
+      'jianqing_feather'         // ⑥ 我很可爱
+    ]
   },
+
+  /* ---------- 木桩（演示用靶子）----------
+     作者 2026-10 的要求：「速度恒定为 0，体型为大，血量 5000，碰撞伤害 50，
+     无技能，用于斗蛐蛐技能演示」。
+
+     为什么它需要一个**引擎级**的开关（immovable）而不是只把 speed 写成 0：
+       · `speed: 0` 只挡住"自己走"（转向/巡敌都是按 speed 给速度的）；
+       · 但碰撞冲量、分离推挤、击退、撞墙反弹都会**直接改 vx/vy**，
+         木桩会被打得满地跑 —— 那就没法当靶子了。
+     所以引擎把 immovable 的小球按"质量极大"处理（见 core.js 的 buildUnits），
+     推挤全部转嫁给对方，撞上来的一方自己弹开，木桩纹丝不动。
+     `speed: 0` 与 `immovable: true` 两个一起才是"速度恒定为 0"。
+
+     ⚠ **两个木桩对打是永远打不完的**（都不会动、碰不到对方）——
+     这不是 bug，是"靶子"的必然结果。要收场就打开「比赛时长上限」。 */
   {
-    id: 'test_lowhp',
-    name: '测试球·脆皮型',
-    color: '#e0a03a',
-    hp: 400,
-    r: 13,
-    speed: 150,
-    melee: 100,
+    id: 'dummy',
+    name: '木桩',
+    color: '#8a6a48',          // 木头色（没有贴图时的兜底圆）
+    hp: 5000,
+    r: 30,                     // 体型为大：直径 60，正好是本体（32）的近两倍
+    speed: 0,                  // 永远不动
+    melee: 50,
     reach: 0,
-    desc: '生命只有 400 但速度更快，用于验证不同体型/血量在混战中的表现差异。',
-    tags: ['测试'],
+    immovable: true,           // 推不动（引擎按"质量极大"处理）
+    desc: '演示用的木桩：不会移动、不会主动出手，血量 5000、体型比本体大一圈，' +
+          '碰撞伤害 50。拿它当靶子看技能效果最直观。' +
+          '注意两个木桩对打是打不完的 —— 它们都动不了，谁也碰不到谁。',
+    tags: ['木桩', '演示'],
     image: null,
+    sticker: null,             // 没有贴图：渲染层会退回纯色圆
     resource: null,
-    skills: []
-  },
-  {
-    id: 'test_heavy',
-    name: '测试球·重装型',
-    color: '#3f8f7f',
-    hp: 1600,
-    r: 21,
-    speed: 88,
-    melee: 100,
-    reach: 0,
-    desc: '生命 1600、体型更大、移动更慢，用于验证体积与推挤手感。',
-    tags: ['测试'],
-    image: null,
-    resource: null,
-    skills: []
+    skills: []                 // 无技能
   }
 ];
 
@@ -336,8 +361,11 @@ export const SPECIES_BY_ID = Object.fromEntries(SPECIES.map(s => [s.id, s]));
  */
 export const BALL_SCALE = 1;
 
-/** 默认选中（新建对局时使用） */
-export const DEFAULT_SPECIES_ID = 'test';
+/** 默认选中（新建对局时使用）。
+ *  也兼作"球种 id 认不出来"时的兜底（旧存档、手改配置）。
+ *  原来是测试球 'test' —— 测试球已经搬到 tests/lib/test-balls.mjs 当夹具了，
+ *  这里改成第一位正式角色。 */
+export const DEFAULT_SPECIES_ID = 'yuncai';
 
 /* ---------- 技能装配 ----------
    每个小球在开战前单独选择要带哪几个技能。
@@ -350,31 +378,39 @@ export const DEFAULT_SPECIES_ID = 'test';
 export const MAX_SKILLS_PER_UNIT = 3;
 
 /**
- * 某球种的默认装配：取技能表里的前 MAX_SKILLS_PER_UNIT 个。
+ * 「随机技能」每局给每个球抽几个技能。
+ * 取 3 是因为它同时是"正常装配上限"，老虎机也正好三格。
+ * （作者只说"依次展示本局抽到的技能"，没指定数量 —— 要改就改这一个数。）
+ */
+export const RANDOM_SKILL_COUNT = MAX_SKILLS_PER_UNIT;
+
+/**
+ * 某球种的默认装配：取技能表里的前 maxSkills 个。
  * **顺序即优先级** —— 想让哪几个技能默认带上，就在 SPECIES 里排在前面。
  */
-export function defaultSkillsFor(speciesId) {
+export function defaultSkillsFor(speciesId, maxSkills = MAX_SKILLS_PER_UNIT) {
   const s = SPECIES_BY_ID[speciesId] || SPECIES_BY_ID[DEFAULT_SPECIES_ID];
-  return (s.skills || []).slice(0, MAX_SKILLS_PER_UNIT);
+  return (s.skills || []).slice(0, maxSkills);
 }
 
 /**
  * 把"想装的技能"整理成合法装配：
  *   · 只保留该球种真的拥有的技能（防止换了球种还留着上一个球种的技能）
- *   · 最多 MAX_SKILLS_PER_UNIT 个
+ *   · 最多 maxSkills 个（**"无限火力"就是把这个上限抬掉**）
  * wanted 传 undefined / null → 用默认装配；
  * 传数组 → 按数组来，允许空数组（= 这个球不带任何技能，也是合法配置）。
  */
-export function normalizeSkills(speciesId, wanted) {
-  if (wanted === undefined || wanted === null) return defaultSkillsFor(speciesId);
+export function normalizeSkills(speciesId, wanted, maxSkills = MAX_SKILLS_PER_UNIT) {
+  if (wanted === undefined || wanted === null) return defaultSkillsFor(speciesId, maxSkills);
   const s = SPECIES_BY_ID[speciesId] || SPECIES_BY_ID[DEFAULT_SPECIES_ID];
   const owned = new Set(s.skills || []);
+  const cap = Number.isFinite(maxSkills) ? Math.max(0, maxSkills) : Infinity;
   const out = [];
   for (const id of wanted) {
     if (!owned.has(id)) continue;          // 不是这个球种的技能，丢掉
     if (out.includes(id)) continue;        // 去重
     out.push(id);
-    if (out.length >= MAX_SKILLS_PER_UNIT) break;
+    if (out.length >= cap) break;
   }
   return out;
 }
@@ -382,9 +418,11 @@ export function normalizeSkills(speciesId, wanted) {
 /** 生成一个战斗单位的运行时初始属性。
  *  半径与移速按 BALL_SCALE 缩放（BALL_SCALE=1 时即原始数值）。
  *  skillIds 省略时使用该球种的默认装配；显式传数组（含空数组）则以它为准。
+ *  opts.maxSkills 传 Infinity 即"无限火力"（不限制装几个技能）。
  */
-export function makeUnitStats(speciesId, skillIds) {
+export function makeUnitStats(speciesId, skillIds, opts = {}) {
   const s = SPECIES_BY_ID[speciesId] || SPECIES_BY_ID[DEFAULT_SPECIES_ID];
+  const cap = opts.maxSkills ?? MAX_SKILLS_PER_UNIT;
   return {
     speciesId: s.id,
     name: s.name,
@@ -394,6 +432,8 @@ export function makeUnitStats(speciesId, skillIds) {
     speed: s.speed * BALL_SCALE,
     melee: s.melee,
     reach: s.reach,
+    /* 木桩：推不动（引擎按"质量极大"处理，见 core.js）。 */
+    immovable: !!s.immovable,
     sticker: s.sticker || null,
     /* 形态切换用的第二张贴图（例如晕彩的"开华"形态）。
        渲染层按快照里的 bloomed 标记决定用哪一张。 */
@@ -403,7 +443,7 @@ export function makeUnitStats(speciesId, skillIds) {
     bow: s.bow || null,
     /* 领域背景层的配置（目前只有晕彩有）。渲染层要靠它拿图片路径与时长。 */
     domain: s.domain ? { ...s.domain } : null,
-    skills: normalizeSkills(s.id, skillIds),
+    skills: normalizeSkills(s.id, skillIds, cap),
     resource: s.resource ? { ...s.resource, value: s.resource.init || 0 } : null
   };
 }
@@ -422,6 +462,18 @@ export const DEFAULT_RULES = {
   respawnDelay: 3,
   /** 是否按场地设置自动收缩边界（关掉则强制不收缩） */
   allowShrink: true,
+  /**
+   * 无限火力：解除"每个球最多 MAX_SKILLS_PER_UNIT 个技能"的限制 ——
+   * 可以把一个球种的技能全带上（晕彩 7 个），也可以一个都不带。
+   * 互斥组（映霞[荣]/[枯]、公主传承）**仍然生效**：那是设计上的"二选一"，
+   * 不是数量上限。
+   */
+  unlimitedSkills: false,
+  /**
+   * 随机技能：准备界面里不能选技能，开战前先抽（三格老虎机动画）。
+   * 抽的是**这个球种自己的**技能池，用本局种子抽，所以同一颗种子抽到同一套。
+   */
+  randomSkills: false,
   /** 是否有比赛时长上限；到点按剩余总血量判定胜负 */
   timeLimit: 0,        // 0 表示不限时
   /** 展示用：是否显示伤害飘字 */

@@ -31,7 +31,19 @@ export function regularPolygon(cx, cy, r, sides, rotationDeg = 0) {
    ------------------------------------------------------------ */
 
 export const ARENAS = [
-  /* ===== 基础几何场地 ===== */
+  /* ===== 基础几何场地 =====
+     作者 2026-10 的要求：**场地只保留几个几何图形的基本场地**。
+     所以带区域效果（岩浆 / 冰原 / 祭坛）、带动态机制（旋转 / 收缩）的那几个
+     全部删掉了，只留下"形状本身就是唯一变量"的这几个。
+
+     唯一的例外是「收缩竞技场」：它保留下来是因为「详细设置」里那条
+     「启用场地自带边界收缩」只对它生效 —— 把唯一的收缩场地删掉，
+     那条设置就成了一个勾了也没反应的死开关。
+     要是连它也不要，删掉它并把那条设置一并去掉即可（引擎里
+     `rules.allowShrink` 与 `effects.shrink` 的支持保留着）。
+
+     没删的是**引擎能力**：`zones`（区域效果）、`effects.rotationSpeedDeg`
+     （旋转）都还能用，以后想加回特殊场地，照下面注释里的格式补一条数据即可。 */
   {
     id: 'rect',
     name: '方形竞技场',
@@ -86,8 +98,6 @@ export const ARENAS = [
     zones: [],
     effects: {}
   },
-
-  /* ===== 多边形边数更多的场地 ===== */
   {
     id: 'decagon',
     name: '十边环场',
@@ -97,77 +107,15 @@ export const ARENAS = [
     zones: [],
     effects: {}
   },
-
-  /* ===== 带特殊效果的场地 ===== */
   {
-    id: 'lava_center',
-    name: '熔心斗场',
-    desc: '场地中央是一片持续灼烧的岩浆区，抢中心要付出代价。',
-    tags: ['特殊效果', '持续伤害'],
-    shape: { type: 'poly', points: regularPolygon(360, 220, 212, 8) },
-    zones: [
-      { id: 'lava', name: '岩浆', type: 'damage', dps: 55, shape: { kind: 'circle', cx: 360, cy: 220, r: 85 },
-        color: 'rgba(220,80,40,0.28)', edge: 'rgba(220,80,40,0.65)' }
-    ],
-    effects: {}
-  },
-  {
-    id: 'ice_field',
-    name: '寒霜冰原',
-    desc: '地面结冰，全场移动速度下降，但中央有一块"暖流"反而加速。',
-    tags: ['特殊效果', '减速', '加速'],
-    shape: { type: 'poly', points: [[0, 0], [720, 0], [720, 440], [0, 440]] },
-    zones: [
-      { id: 'warm', name: '暖流', type: 'haste', mul: 1.55, shape: { kind: 'circle', cx: 360, cy: 220, r: 95 },
-        color: 'rgba(80,170,255,0.18)', edge: 'rgba(120,200,255,0.6)' }
-    ],
-    effects: { globalSpeedMul: 0.72 }
-  },
-  {
-    id: 'dual_zone',
-    name: '双生祭坛',
-    desc: '左右各有一座祭坛，站在己方祭坛上受到的治疗与速度加成更高，逼出"守点"战术。',
-    tags: ['特殊效果', '区域增益'],
-    shape: { type: 'poly', points: [[0, 0], [720, 0], [720, 440], [0, 440]] },
-    zones: [
-      { id: 'altarA', name: '左祭坛', type: 'haste', mul: 1.4, shape: { kind: 'circle', cx: 130, cy: 220, r: 78 },
-        color: 'rgba(47,109,246,0.20)', edge: 'rgba(47,109,246,0.6)' },
-      { id: 'altarB', name: '右祭坛', type: 'haste', mul: 1.4, shape: { kind: 'circle', cx: 590, cy: 220, r: 78 },
-        color: 'rgba(232,69,44,0.20)', edge: 'rgba(232,69,44,0.6)' }
-    ],
-    effects: {}
-  },
-
-  /* ===== 动态场地（会随时间变化）===== */
-  {
+    /* 唯一保留的"会随时间变化"的场地 —— 见上面的说明（那条设置要用它） */
     id: 'shrink_ring',
     name: '收缩竞技场',
-    desc: '场地会不断向内收缩，逼迫所有小球碰面，永远不会出现互相绕圈的僵局。',
-    tags: ['特殊效果', '动态', '收缩'],
+    desc: '十二边形场地，会不断向内收缩，逼迫所有小球碰面，永远不会出现互相绕圈的僵局。',
+    tags: ['基础', '动态', '收缩'],
     shape: { type: 'poly', points: regularPolygon(360, 220, 215, 12) },
     zones: [],
     effects: { shrink: { startDelay: 4, ratePerSec: 0.028, minScale: 0.34 } }
-  },
-  {
-    id: 'rotating_square',
-    name: '回旋方阵',
-    desc: '方形场地持续缓慢旋转，边角会扫过场上的小球，把站桩的单位推开。',
-    tags: ['特殊效果', '动态', '旋转'],
-    shape: { type: 'poly', points: regularPolygon(360, 220, 190, 4), rotate: true },
-    zones: [],
-    effects: { rotationSpeedDeg: 9 }
-  },
-  {
-    id: 'chaos',
-    name: '混沌之厅',
-    desc: '收缩 + 旋转 + 中央灼烧三重压力，纯粹为混乱与节目效果而生。',
-    tags: ['特殊效果', '动态', '高危'],
-    shape: { type: 'poly', points: regularPolygon(360, 220, 215, 8), rotate: true },
-    zones: [
-      { id: 'core', name: '灼热核心', type: 'damage', dps: 40, shape: { kind: 'circle', cx: 360, cy: 220, r: 70 },
-        color: 'rgba(220,80,40,0.22)', edge: 'rgba(220,80,40,0.55)' }
-    ],
-    effects: { rotationSpeedDeg: 6, shrink: { startDelay: 6, ratePerSec: 0.022, minScale: 0.42 } }
   }
 ];
 

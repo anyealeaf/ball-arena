@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>小球角斗场 · 本地启动器</title>
+<link rel="stylesheet" href="css/styles.css">
+<style>
+  /* 启动器专属的一点点样式（游戏本体的样式表不动它） */
+  .launch-lead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+         background: var(--muted); margin-right: 6px; vertical-align: 1px; }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.bad { background: var(--bad); }
+  .pulse { animation: lp 1.1s ease-in-out infinite; }
+  @keyframes lp { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .stat { font-size: 13.5px; margin: 0 0 6px; }
+  .stat b { font-weight: 700; }
+  .kv { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+        background: var(--paper2); border: 1px solid var(--line2); border-radius: 7px;
+        padding: 2px 7px; display: inline-block; }
+  .steps { margin: 6px 0 0; padding-left: 20px; color: var(--muted); font-size: 13px; }
+  .steps li { margin: 3px 0; }
+  .keys { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  kbd { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+        border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px;
+        padding: 1px 5px; background: var(--paper); }
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="brand">小球角斗场<small>本地启动器</small></div>
+      <div class="spacer"></div>
+      <span id="srv" class="stat"><span class="dot pulse"></span>正在检测服务器…</span>
+    </div>
+
+    <p class="lead launch-lead">
+      从这里进入本地端网页。两个入口都在下面 ——
+      <span class="hint">（关掉服务器那个黑窗口 = 全部停止）</span>
+    </p>
+
+    <div class="menu">
+      <a class="menu-card" id="goGame" href="index.html" style="text-decoration:none;color:inherit">
+        <span class="ic">🎮</span>
+        <h3>进入游戏</h3>
+        <p>斗蛐蛐主站：图鉴 → 准备 → 开战。观战型自动战斗，开打之后不再干预。</p>
+      </a>
+      <a class="menu-card" id="goEditor" href="assets-editor.html" style="text-decoration:none;color:inherit">
+        <span class="ic">🎛️</span>
+        <h3>素材编辑器</h3>
+        <p>可视化调尺寸 / 透明度 / 光晕 / 判定圆，右上角一键写回 <span class="mono">js/*.js</span>。</p>
+      </a>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>服务器状态</h3>
+      <div id="detail"><p class="hint" style="margin:0">正在检测…</p></div>
+      <p style="margin:10px 0 0">
+        <button class="btn sm" id="probeBtn">重新检测</button>
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>怎么用</h3>
+      <ol class="steps">
+        <li>在 <span class="mono">game</span> 文件夹里双击 <b>启动器.bat</b> ——
+            它会开好本地服务器，并自动打开这个页面。</li>
+        <li>点上面任意一个入口。<b>不要</b>直接双击 <span class="mono">index.html</span>：
+            那样地址栏是 <span class="mono">file://</span>，浏览器会拦下 ES 模块，页面是空白的。</li>
+        <li>素材编辑器要<b>保存</b>（写回源码）必须走服务器；页面上会明确提示当前能不能存。</li>
+        <li>结束：关掉那个黑色命令行窗口即可（它就是服务器）。</li>
+      </ol>
+      <p class="keys">快捷键：<kbd>1</kbd> 进游戏　<kbd>2</kbd> 进编辑器　<kbd>R</kbd> 重新检测</p>
+      <p class="hint" style="margin:8px 0 0">
+        完整说明（含各项自检命令）在 <a href="README.md" target="_blank">README.md</a>
+        ——「编辑器存不上」先跑 <span class="mono">node tools/check-server.mjs</span>，
+        「页面打不开」先跑 <span class="mono">node tools/check-boot.mjs</span>。
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>打不开的话</h3>
+      <p class="stat" style="margin:0">
+        <b>浏览器说"无法访问"</b> → 服务器没在跑：重新双击 <span class="mono">启动器.bat</span>。<br>
+        <b>页面空白</b> → 多半是用 <span class="mono">file://</span> 直接打开了 html：请从这个启动器进。<br>
+        <b>编辑器保存报"没有 /__edit 接口"</b> → 正在跑的是旧版服务器：关掉黑窗口重新启动。
+      </p>
+      <p class="hint" style="margin:8px 0 0">
+        端口不是死记的 5173：5173 被占用时服务器会自动顺延，
+        <b>以服务器窗口打印的地址为准</b>（这个页面会自动跟着实际端口走）。
+      </p>
+    </div>
+  </div>
+
+<script>
+/* ============================================================
+   本地启动器 · 页面脚本
+   ------------------------------------------------------------
+   刻意**不用 ES 模块**：本页面可能被直接双击打开（file://），
+   而浏览器在 file:// 下会拦下模块脚本 —— 那样连"启动器"本身都打不开，
+   作者就只剩下一片空白和"到底哪一步错了"。
+   纯脚本 + <link> 样式表在 file:// 下都能正常工作。
+   ============================================================ */
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var host = location.hostname || '';
+  var served = location.protocol === 'http:' || location.protocol === 'https:';
+  var isLocal = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/i.test(host);
+  /* 被 file:// 直接打开时推不出端口，只能猜默认的 5173（服务器窗口会打印真实地址） */
+  var base = served ? '' : 'http://localhost:5173/';
+  var gameUrl = base + 'index.html';
+  var editorUrl = base + 'assets-editor.html';
+
+  /* 入口按钮：served 时用同源相对路径 → 自动跟着实际端口（5174/5175 也对） */
+  var aGame = $('goGame'), aEditor = $('goEditor');
+  if (aGame) aGame.setAttribute('href', gameUrl);
+  if (aEditor) aEditor.setAttribute('href', editorUrl);
+
+  var srvEl = $('srv'), detailEl = $('detail');
+
+  function badge(kind, text) {
+    var cls = kind === 'ok' ? 'dot ok' : kind === 'warn' ? 'dot warn' : kind === 'bad' ? 'dot bad' : 'dot';
+    var spin = kind === 'checking' ? ' pulse' : '';
+    if (srvEl) srvEl.innerHTML = '<span class="' + cls + spin + '"></span>' + text;
+  }
+
+  function show(html) { if (detailEl) detailEl.innerHTML = html; }
+
+  function urls() {
+    var port = location.port ? ':' + location.port : '';
+    var root = served ? 'http://' + host + port + '/' : 'http://localhost:5173/';
+    return '<p class="stat" style="margin:0 0 4px">服务器端口：<span class="kv">' +
+      (served ? (port || ':80') : '（未连接）') + '</span></p>' +
+      '<p class="stat" style="margin:0">游戏 <span class="kv">' + root + '</span><br>' +
+      '编辑器 <span class="kv">' + root + 'assets-editor.html</span></p>';
+  }
+
+  /** 带超时的 fetch —— 服务器没在跑时不要让孩子对着"检测中"等下去 */
+  function grab(url, opt, ms) {
+    var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, ms || 2500);
+    var o = opt || {};
+    if (ctl) o.signal = ctl.signal;
+    return fetch(url, o).then(function (r) { clearTimeout(timer); return r; },
+      function (e) { clearTimeout(timer); throw e; });
+  }
+
+  function probe() {
+    badge('checking', '正在检测服务器…');
+    show('<p class="hint" style="margin:0">正在检测…</p>');
+
+    /* 线上页面 / file:// 打开：本地服务器这条线不适用，直接说清楚 */
+    if (!served || !isLocal) {
+      if (!served) {
+        badge('bad', '没有被服务器托管');
+        show('<p class="stat" style="margin:0">本页是用 <span class="mono">file://</span> 直接打开的，' +
+          '连不到本地服务器。</p>' +
+          '<p class="stat" style="margin:6px 0 0">请回到 <span class="mono">game</span> 文件夹双击 ' +
+          '<b>启动器.bat</b>，它会开好服务器并打开真正的启动器页面。</p>' + urls());
+      } else {
+        badge('', '线上访问（不检测本机）');
+        show('<p class="stat" style="margin:0">这是<i>线上</i>页面，本地服务器与它无关；' +
+          '上面两个按钮会直接打开线上网页。</p>');
+      }
+      return;
+    }
+
+    grab('js/balls.js', { method: 'HEAD', cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return grab('__edit', {
+        method: 'POST', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+    }).then(function (r) {
+      /* 写回接口拿空请求会回 400（"edits 不能为空"）—— 那就说明接口在。
+         回 404 说明跑着的是**旧版** serve.mjs（加这个接口之前的版本）。 */
+      if (r.status === 404) {
+        badge('warn', '服务器是旧版（缺写回接口）');
+        show('<p class="stat" style="margin:0"><b>游戏能玩，但素材编辑器存不了。</b></p>' +
+          '<p class="stat" style="margin:6px 0 0">原因：正在跑的 <span class="mono">serve.mjs</span> ' +
+          '是加 <span class="mono">POST /__edit</span> 之前的版本。</p>' +
+          '<p class="stat" style="margin:6px 0 0">办法：关掉那个黑色窗口，重新双击 <b>启动器.bat</b>，' +
+          '再刷新编辑器页面。</p>' + urls());
+        return;
+      }
+      badge('ok', '服务器运行中');
+      show('<p class="stat" style="margin:0"><b>一切正常</b>：页面能开、素材编辑器也能保存（写回接口可用）。</p>' +
+        urls());
+    }).catch(function () {
+      badge('bad', '服务器没连上');
+      show('<p class="stat" style="margin:0">探测不到本机服务器 —— 它没在跑，或者已经被关掉了。</p>' +
+        '<p class="stat" style="margin:6px 0 0">办法：回到 <span class="mono">game</span> 文件夹双击 ' +
+        '<b>启动器.bat</b>。</p>' + urls());
+    });
+  }
+
+  var btn = $('probeBtn');
+  if (btn) btn.onclick = probe;
+
+  document.addEventListener('keydown', function (e) {
+    var k = e.key ? e.key.toLowerCase() : '';
+    if (k === '1') location.href = gameUrl;
+    else if (k === '2') location.href = editorUrl;
+    else if (k === 'r') probe();
+  });
+
+  probe();
+})();
+</script>
+</body>
+</html>

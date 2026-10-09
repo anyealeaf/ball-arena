@@ -2,6 +2,7 @@
    while still closing fast? A tiny tangent contact is fine; deep penetration
    with high closing speed means the impulse was missed.
    (ASCII only.) */
+import '../lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
 import { Battle } from '../../js/core.js';
 import { ARENA_BY_ID } from '../../js/arenas.js';
 import { DEFAULT_RULES, makeUnitStats, SCALE } from '../../js/balls.js';
