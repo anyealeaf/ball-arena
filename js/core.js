@@ -49,6 +49,18 @@ export const MIN_SPEED = 20;
    转速由层数驱动，所以"叠得越多转得越疯"是看得见的。 */
 export const SPIN_RATE_PER_STACK = 1.2;
 
+/* ---------- 弹道的"最短可见时间" ----------
+   背景（作者 2026-10 报的"手操时特效有可能消失"）：
+   贴着墙开枪时，弹道**在出生的那一帧就撞墙**了 —— 撞墙的收尾是
+   `p.alive = false`，而快照是这一帧末尾才记的，于是这一发**一次都没被画出来**：
+   玩家点了左键，屏幕上什么都没发生（连那点"水花"也是贴在墙上的一个小圈）。
+   自动模式下几乎见不到，因为 AI 总是朝敌人打 —— 所以它是"手操专属"的怪现象。
+
+   修法：任何弹道在出生的头几帧里**不许直接消失**，改成"停在原地、把剩下的时间
+   用来淡出"（渲染层本来就按 life/maxLife 做末端淡出，所以只要把寿命改短即可）。
+   这几帧里它不再移动、也不再判命中/撞墙，所以不会重复结算伤害或重复出水花。 */
+export const PROJ_MIN_VISIBLE_FRAMES = 5;
+
 /* ---------- 玩家操控 ---------- */
 /** 玩家按住方向键后，多少秒把速度拉到"朝该方向、大小为球速"。
  *  也用于松开按键后的减速 —— 作者的口径是"松开很快停下"。
@@ -1727,6 +1739,10 @@ export class Battle {
          而不是普通的圆形光点。 */
       feather: !!p.feather,
       hitsLeft: p.hitsLeft ?? 1,     // 还剩几次命中判定（默认一次）
+      /* 出生帧号 + "冻住"标记：见 PROJ_MIN_VISIBLE_FRAMES ——
+         出生头几帧里不许直接消失，改成停在原地淡出。 */
+      bornFrame: this.frame,
+      frozen: false,
       /* 光束类弹道（激光）：渲染成长条拖影而不是圆点。
          不能靠"宽度/半径"的比值去猜 —— 激光的宽度恰好是半径的 2 倍，
          和普通圆弹一样，比值区分不出来（踩过这个坑）。 */
@@ -1810,6 +1826,21 @@ export class Battle {
     }
   }
 
+  /* ---------- 弹道"最短可见时间"的收尾 ----------
+     一枚弹道要消失了，但它**出生还不到 PROJ_MIN_VISIBLE_FRAMES 帧** ——
+     那就别真消失：冻在原地，把剩下的那几帧当寿命用来淡出。
+     返回 true = 可以真的死了；false = 已经冻住（这一帧先留着）。 */
+  _freezeInsteadOfKill(p) {
+    const age = this.frame - (p.bornFrame ?? this.frame);
+    if (age >= PROJ_MIN_VISIBLE_FRAMES) return true;
+    p.frozen = true;
+    p.vx = 0;
+    p.vy = 0;
+    /* 剩下的帧数当寿命：渲染层按 life/maxLife 做末端淡出，所以它会自然淡掉 */
+    p.life = Math.max(DT, (PROJ_MIN_VISIBLE_FRAMES - age) * DT);
+    return false;
+  }
+
   _updateProjectiles(shape) {
     const ps = this.projectiles;
     if (!ps.length) return;
@@ -1824,6 +1855,9 @@ export class Battle {
         this._emit('projExpire', null, null, 0, { px: p.x / SCALE, py: p.y / SCALE, tag: p.tag });
         continue;
       }
+      /* 冻住的弹道（出生头几帧就撞了东西）：只剩"淡出"这一件事，
+         既不移动也不再判命中/撞墙 —— 否则会重复结算伤害、重复出水花。 */
+      if (p.frozen) continue;
 
       /* ---------- 锚定光柱：位置跟住锚点，方向朝锁定目标 ----------
          放在位移之前：锚定弹道的"位置"不是积分出来的，是每帧从主人身上抄的。 */
@@ -1971,10 +2005,12 @@ export class Battle {
           this._emit('projBounce', null, null, 0, { px: p.x / SCALE, py: p.y / SCALE, color: p.color });
           continue;
         }
-        p.alive = false;
+        p.x = c.x; p.y = c.y;                 // 先贴住墙面（要留几帧也得贴对位置）
         /* 撞墙而死、且一次都没命中 = 打空了（"箭矢落空"就是这个） */
         if (!p.didHit && p.onMiss) p.onMiss(this, this.units[p.owner] || null, p);
         this._emit('projWall', null, null, 0, { px: (c.x) / SCALE, py: (c.y) / SCALE, color: p.color, tag: p.tag });
+        /* 出生头几帧里撞墙 → 冻住淡出，别一帧都不给看（见 _freezeInsteadOfKill） */
+        if (this._freezeInsteadOfKill(p)) p.alive = false;
         continue;
       }
 
@@ -2026,7 +2062,10 @@ export class Battle {
           break;
         }
         p.hitsLeft--;
-        if (p.hitsLeft <= 0) p.alive = false;
+        if (p.hitsLeft <= 0) {
+          /* 贴脸命中时也是"出生当帧就没了" —— 同样先冻住淡出几帧 */
+          if (this._freezeInsteadOfKill(p)) p.alive = false;
+        }
         break;
       }
     }

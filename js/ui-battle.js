@@ -152,6 +152,7 @@ export function renderBattle(root, cfg, onExit) {
             <div class="hint">全自动模式：所有小球由 AI 自行战斗。</div>
           `}
         </div>
+        <div class="hint guard-hint" id="guardHint" hidden></div>
       </div>
 
       <div>
@@ -753,6 +754,18 @@ export function renderBattle(root, cfg, onExit) {
     drawLog();
     drawHud();
     syncControls();
+    /* "手势被拦下"的提示：只显示一会儿（帧数倒计时，不依赖墙上时钟） */
+    if (guardHint) {
+      if (guardNoticeFrames > 0) {
+        guardNoticeFrames--;
+        if (guardHint.hidden) {
+          guardHint.hidden = false;
+          guardHint.textContent = '⚠ 对局进行中：右键手势 / 浏览器后退已被拦下（再按一次后退可退出，或点「重新准备」）';
+        }
+      } else if (!guardHint.hidden) {
+        guardHint.hidden = true;
+      }
+    }
     if (dbgBox && dbgOn) updateDebug();
     /* 打完了就停下播放键 + 出结算卡（实时模式下只有 simDone 才是真的"打完"） */
     if (simDone && ui.frame >= totalFrames) {
@@ -901,6 +914,75 @@ export function renderBattle(root, cfg, onExit) {
      现在玩家操控是实时推进、鼠标用来瞄准（左键/右键还是技能键），
      再按住拖动就会和开火打架，所以整段删掉。键鼠之外的操控方式以后再说。 */
 
+  /* ---------- 11) 误触 / 鼠标手势保护 ----------
+     右键是 2 号技能键（作者指定的默认键位），而"按住右键拖动"在很多浏览器
+     或鼠标驱动里是**后退手势** —— 一旦触发，浏览器就退回上一页/上一个路由，
+     这一局当场没了（作者实测就是这个）。
+
+     两道防线：
+       ① **整个战斗界面**屏蔽右键菜单与中键（以前只挡了画布，
+          在顶栏/侧栏上按右键照样弹菜单）；
+       ② 给路由挂一个"守门人"（`window.__battleScreen`）：对局**进行中**时，
+          非本界面主动发起的跳转会被拦下，并给一句提示。
+          连按两次后退（1.5 秒内）才放行 —— 想退出的人不会被硬关在里面。 */
+  let leaveRequested = false;
+  let guardHits = 0, lastGuardAt = 0, guardNoticeFrames = 0;
+  const guardHint = root.querySelector('#guardHint');
+
+  function detach() {
+    screenGuard.alive = false;
+    keysDown.clear();
+    keysEdge.clear();
+    window.removeEventListener('resize', onResize);
+    if (live) {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlurWin);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onCanvasUp);
+      canvas.removeEventListener('mousedown', onCanvasDown);
+      canvas.removeEventListener('contextmenu', onCtxMenu);
+    }
+    root.removeEventListener('contextmenu', onCtxRoot);
+    root.removeEventListener('auxclick', onAuxRoot);
+    if (ro) { ro.disconnect(); ro = null; }
+    if (window.__battleScreen === screenGuard) window.__battleScreen = null;
+  }
+
+  const screenGuard = {
+    alive: true,
+    /** 这一局还"值得保护"吗？
+     *  实时模式看引擎（battle.over）；全自动模式**开局就 over 了**（整局已算完），
+     *  所以那种情况要看播放头有没有播到头 —— 用 battle.over 判会把全自动模式
+     *  当成"打完了"，守门人等于没挂（check-boot 就是这么抓出来的）。 */
+    running() {
+      if (!ui.started) return false;
+      return live ? !battle.over : ui.frame < totalFrames;
+    },
+    /** 路由问它："这次跳转能走吗？" true = 拦下来（地址会被改回 #/battle）。 */
+    block(hash) {
+      if (!screenGuard.alive || leaveRequested) return false;
+      /* 还没点开始 / 已经播完：随便走（没什么可丢的） */
+      if (!screenGuard.running()) return false;
+      const h = String(hash || '');
+      if (h === '#/battle' || h.startsWith('#/battle')) return false;
+      const now = performance.now();
+      if (now - lastGuardAt > 1500) guardHits = 0;        // 隔久了重新数
+      lastGuardAt = now;
+      guardHits++;
+      if (guardHits >= 2) return false;                   // 连按两次：放行
+      guardNoticeFrames = 160;
+      return true;
+    },
+    detach,
+  };
+
+  /* 右键/中键：在战斗界面里一律不弹菜单、也不做浏览器默认动作 */
+  const onCtxRoot = e => { e.preventDefault(); };
+  const onAuxRoot = e => { e.preventDefault(); };
+  root.addEventListener('contextmenu', onCtxRoot);
+  root.addEventListener('auxclick', onAuxRoot);
+
   /* 画布尺寸依赖场地大小（小场地放大铺满），窗口变化时按当前缩放重算 */
   const onResize = () => renderer.resize();
   window.addEventListener('resize', onResize);
@@ -927,27 +1009,23 @@ export function renderBattle(root, cfg, onExit) {
   requestAnimationFrame(() => renderer.resize());
   setTimeout(() => renderer.resize(), 120);
 
-  /* 返回时清掉键盘状态、移除监听，避免"卡键"和监听叠加 */
+  /* 退出：先"拆监听"（detach），再交给上层去换界面。
+     `leaveRequested` 是给守门人看的 —— 我们自己点的退出不该被自己拦下。 */
   const origExit = onExit;
   const leave = (again) => {
-    window.__battleKeyState?.clear();
-    window.removeEventListener('resize', onResize);
-    if (live) {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlurWin);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onCanvasUp);
-      canvas.removeEventListener('mousedown', onCanvasDown);
-      canvas.removeEventListener('contextmenu', onCtxMenu);
-    }
-    if (ro) { ro.disconnect(); ro = null; }
+    leaveRequested = true;
+    detach();
     origExit(again);
   };
   root.querySelector('#btBack').onclick = () => leave(false);
   root.querySelector('#btAgain').onclick = () => leave(true);
 
   /* ---------- 12) 启动 ---------- */
+  /* 上一个战斗界面（例如"换种子重开"）先拆干净，再把这一个挂给路由当守门人 */
+  if (window.__battleScreen && typeof window.__battleScreen.detach === 'function') {
+    window.__battleScreen.detach();
+  }
+  window.__battleScreen = screenGuard;
   renderer.resize();
   drawStrip(0);
   drawLog();

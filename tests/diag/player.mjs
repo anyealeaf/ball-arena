@@ -378,6 +378,54 @@ console.log('\n【5】实时模式的播放控件');
   }
 }
 
+/* ---------- 8.5) 右键 / 浏览器手势保护 ---------- */
+console.log('\n【5.5】右键与手势保护');
+{
+  /* ⚠ 顺序要紧：每次 startBattle() 都会把上一局的监听 detach 掉，
+     所以"每个界面只做它自己的断言"，不要在中间换界面 ——
+     换掉之后旧节点已经脱离 DOM，事件不再冒泡（第一版就是这么假红的）。 */
+  const idle = startBattle();
+  check('还没点开始时不拦（没什么可丢的）',
+    window.__battleScreen.block('#/prepare') === false);
+
+  const ui = startBattle();
+  clickStart(ui);
+  runFrames(10);
+  const screen = window.__battleScreen;
+  check('战斗界面挂了"守门人"给路由', !!screen && typeof screen.block === 'function' &&
+    typeof screen.detach === 'function');
+  check('对局进行中：后退/手势会被拦下', screen.block('#/prepare') === true);
+  runFrames(2);          // 提示是在播放循环里显示出来的
+  const hint = root.querySelector('#guardHint');
+  check('拦下时给出提示（不是静默无视）', !!hint && hint.hidden === false,
+    hint ? `hidden=${hint.hidden}` : '没有提示元素');
+  check('连按两次后退就放行（不会把人硬关在里面）', screen.block('#/prepare') === false);
+  check('切回 #/battle 本身不算"离开"', screen.block('#/battle') === false);
+
+  /* 右键菜单：整个战斗界面都要挡住（右键默认是 2 号技能键） */
+  const ev = new window.Event('contextmenu', { bubbles: true, cancelable: true });
+  ui.canvas.dispatchEvent(ev);
+  check('战斗界面上右键不弹浏览器菜单', ev.defaultPrevented === true, String(ev.defaultPrevented));
+  const ev2 = new window.Event('contextmenu', { bubbles: true, cancelable: true });
+  root.querySelector('.playbar').dispatchEvent(ev2);
+  check('连播放条上的右键也挡（以前只挡了画布）', ev2.defaultPrevented === true, String(ev2.defaultPrevented));
+
+  /* 自己点「重新准备」：守门人不能让正常退出失效，而且要拆干净监听 */
+  let exits = 0;
+  root.innerHTML = '';
+  rafQueue.length = 0;
+  renderBattle(root, mkCfg(), () => { exits++; });
+  clickStart({ startBtn: root.querySelector('#btStart') });
+  runFrames(4);
+  const s2 = window.__battleScreen;
+  check('新一局接管了守门人（旧的已被摘掉）', s2 && s2.alive === true, String(!!s2));
+  root.querySelector('#btBack').onclick();
+  check('点「重新准备」能正常退出（不会被守门人拦下）', exits === 1, `${exits} 次`);
+  check('退出后守门人已摘掉（不会再吞键盘事件）',
+    !window.__battleScreen || window.__battleScreen.alive === false,
+    String(!!window.__battleScreen));
+}
+
 /* ---------- 9) 全自动模式不受影响 ---------- */
 console.log('\n【6】没开玩家操控时一切照旧');
 {

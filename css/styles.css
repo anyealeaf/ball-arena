@@ -437,6 +437,14 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 .ctrl-hud .ch-auto { margin-top: 5px; color: var(--muted); }
 
+/* 战斗界面的"手势被拦下"提示（右键手势/浏览器后退想带走这一局时出现） */
+.guard-hint {
+  margin: 6px 0 0;
+  color: var(--bad);
+  font-weight: 600;
+}
+.guard-hint[hidden] { display: none; }
+
 /* ---------- 「斗蛐蛐开始」遮罩 ----------
    进战斗界面先不跑：等玩家点按钮才真正开打（作者 2026-10 的要求）。
    和抽签层一样：默认 display:none，加 .show 才出现 ——

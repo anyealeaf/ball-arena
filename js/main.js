@@ -122,6 +122,21 @@ function renderMenu() {
 
 function route() {
   const h = location.hash || '';
+  /* ---------- 战斗界面的"守门人" ----------
+     右键是玩家操控的 2 号技能键，而"按住右键拖动"在不少浏览器/鼠标驱动里
+     是**后退手势** —— 一触发就会跳走，这一局当场没了（作者实测）。
+     所以战斗界面会把一个守门人挂在 window 上：
+       · block(h) 返回 true → 这次跳转拦下、地址改回 #/battle，界面原样留着；
+       · 已经在打 (#/battle) 且守门人还活着 → 不重开一局。 */
+  const screen = window.__battleScreen;
+  if (screen && typeof screen.block === 'function' && screen.block(h)) {
+    if (location.hash !== '#/battle') location.hash = '#/battle';
+    return;
+  }
+  if (h.startsWith('#/battle') && screen && screen.alive) return;   // 已经在打，别重开
+  if (screen && typeof screen.detach === 'function') screen.detach();   // 换界面：先拆监听
+  window.__battleScreen = null;
+
   if (h.startsWith('#/codex')) {
     renderCodex(root);
   } else if (h.startsWith('#/prepare')) {

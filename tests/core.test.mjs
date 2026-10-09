@@ -7,7 +7,7 @@
    ============================================================ */
 
 import './lib/test-balls.mjs';   // 测试球夹具（那几个球已从游戏里移除，只给诊断脚本用）
-import { Battle, SNAP_STRIDE } from '../js/core.js';
+import { Battle, SNAP_STRIDE, PROJ_MIN_VISIBLE_FRAMES } from '../js/core.js';
 import {
   SPECIES_BY_ID, DEFAULT_RULES, makeUnitStats, SCALE, BALL_SCALE, DT,
   MAX_SKILLS_PER_UNIT, defaultSkillsFor, normalizeSkills
@@ -753,6 +753,33 @@ console.log('\n【14f】玩家操控：八向移动 / 开局无冲量 / 按键�
       angles.length === 5 &&
       Math.abs((angles[4] - angles[0]) - TAOYAO.rong.burstSpread * 2 * 180 / Math.PI) < 1.5,
       `相差 ${(angles[4] - angles[0]).toFixed(1)}°`);
+  }
+
+  /* ---- 贴脸开火也必须看得见（作者 2026-10 报的"手操时特效有可能消失"）----
+     贴着墙开枪时，弹道会在**出生的那一帧**就撞墙消失 —— 而快照是帧末才记的，
+     于是这一发一次都没被画出来。修法是"出生头几帧不许直接死，改成冻住淡出"。 */
+  {
+    const b = mkPlayer('yuncai', ['yuncai_modan']);
+    const u = b.units[0];
+    u.x = Math.round(17 * SCALE); u.y = Math.round(220 * SCALE);   // 贴着左墙（r=16）
+    b.units[1].x = Math.round(640 * SCALE); b.units[1].y = Math.round(400 * SCALE);
+    b.step({ dx: 0, dy: 0, fire: [] });
+    const wall0 = b.events.filter(e => e.type === 'projWall').length;
+    b.step({ dx: 0, dy: 0, fire: ['yuncai_modan'], aimX: 0, aimY: 220 });   // 朝墙外
+    let seen = 0;
+    for (let i = 0; i < 20; i++) {
+      const snap = b.snapshots[b.snapshots.length - 1];
+      if (snap.proj && snap.proj.length > 0) seen++;
+      b.step({ dx: 0, dy: 0, fire: [] });
+    }
+    check(`贴脸朝墙开枪：这一发至少被画了 ${PROJ_MIN_VISIBLE_FRAMES} 帧（不再一帧就没）`,
+      seen >= PROJ_MIN_VISIBLE_FRAMES - 1, `被画 ${seen} 帧`);
+    check('冻住淡出期间不会重复结算（水花只出一次）',
+      b.events.filter(e => e.type === 'projWall').length === wall0 + 1,
+      `${b.events.filter(e => e.type === 'projWall').length - wall0} 次`);
+    check('冻住的那一枚最终还是会消失（不会永远留在场上）',
+      b.projectiles.filter(p => p.alive).length === 0,
+      `${b.projectiles.filter(p => p.alive).length} 枚还在`);
   }
 
   /* ---- 被动 / 形态类技能照旧自动触发；弓跟着鼠标 ---- */

@@ -152,6 +152,43 @@ const check = (name, ok, detail = '') => checks.push({ name, ok: !!ok, detail })
     check('战斗画面真的在画东西（跑 40 帧有绘制调用）', env.calls.n > before,
       `${env.calls.n - before} 次绘制调用`);
     check('战斗页没有被"页面没能启动"面板替换', !text().includes('页面没能启动'));
+
+    /* ---- 开战闸门 + 鼠标手势保护（作者 2026-10）---- */
+    const sBtn = app.querySelector('#btStart');
+    check('战斗页有「斗蛐蛐开始」按钮', !!sBtn);
+    const seek = app.querySelector('#btSeek');
+    check('没点开始之前播放头不动', Number(seek.value) === 0, `播放头 ${seek.value}`);
+    if (sBtn) {
+      guard('点开始', () => sBtn.onclick());
+      env.runFrames(20);
+      check('点开始之后播放头开始走', Number(seek.value) > 0, `播放头 ${seek.value}`);
+      /* 模拟"右键手势 / 浏览器后退"：把地址改掉再发 hashchange，
+         守门人应当把这一局留在原地（地址被改回来、界面没被换掉）。 */
+      const canvasBefore = app.querySelector('#battleCanvas');
+      guard('模拟手势后退', () => {
+        env.loc.hash = '#/prepare';
+        env.window.dispatchEvent(new env.window.Event('hashchange'));
+      });
+      check('手势后退被拦下：战斗界面没被换掉',
+        app.querySelector('#battleCanvas') === canvasBefore && !!app.querySelector('#btPlay'));
+      check('地址被改回 #/battle', String(env.loc.hash).startsWith('#/battle'), env.loc.hash);
+      env.runFrames(3);
+      check('拦下时会给出提示（不是静默无视）',
+        !!app.querySelector('#guardHint') && app.querySelector('#guardHint').hidden === false);
+      /* 右键菜单：整个战斗界面都不该弹 */
+      const ev = new env.window.Event('contextmenu', { bubbles: true, cancelable: true });
+      app.querySelector('#battleCanvas').dispatchEvent(ev);
+      check('战斗界面上右键不会弹出浏览器菜单（默认行为被挡）',
+        ev.defaultPrevented === true, String(ev.defaultPrevented));
+      /* 主动退出仍然畅通：点「重新准备」就真的走 */
+      const back = app.querySelector('#btBack');
+      if (back && back.onclick) {
+        guard('点重新准备', () => back.onclick());
+        go('#/prepare');
+        check('自己点「重新准备」不会被守门人拦下（能正常回到准备页）',
+          !!app.querySelector('#startBtn') && !app.querySelector('#battleCanvas'));
+      }
+    }
   }
 }
 
