@@ -209,6 +209,41 @@ try {
       return !!raw && JSON.parse(raw).skillDetail === true;
     })());
 
+    /* ---------- 作者定稿的"简要描述"要原样显示 ----------
+       2026-10 作者把桃夭 5 个 + 缇娜 7 个技能的简要描述统一改写过一遍，
+       这里的判据是"面板上显示的就是 desc 本身"（不是别的字段、也不做加工）——
+       以后他再改文案，测试不会因为"文案变了"而红，只有"显示错字段"才会红。 */
+    {
+      /* ⚠ 上面刚把偏好切成"详细"，这里要先切回"简要" ——
+         否则量到的是 descDetail（第一版就是这么假红的）。 */
+      P.setSkillDetail(false);
+      const cases = [
+        ['taoyao', '映霞[荣]', mods.skills.getSkill('taoyao_rong').desc],
+        ['tina', '公主传承3', mods.skills.getSkill('tina_p3').desc],
+        ['jianqing', '水镜·魔力共鸣（攻击）', mods.skills.getSkill('jianqing_mirror_borrow').desc],
+      ];
+      let allShown = true, detail = '';
+      for (const [speciesId, skillName, desc] of cases) {
+        const idx = mods.balls.SPECIES.findIndex(s => s.id === speciesId);
+        cards[idx].onclick();
+        const html = root.querySelector('#cdDetail').innerHTML;
+        if (!html.includes(desc)) { allShown = false; detail = `${skillName}: ${desc}`; }
+        /* 技能名同样要"显示的就是 name 字段"——③ 这一轮刚刚改过名 */
+        if (!html.includes(skillName)) { allShown = false; detail = `名字没显示：${skillName}`; }
+      }
+      check('图鉴简要模式显示的就是 desc 原文（桃夭 / 缇娜 / 见晴 各抽一个）', allShown, detail || '都对上了');
+      const twelve = ['taoyao_rong', 'taoyao_ku', 'taoyao_aim', 'taoyao_chunjing', 'taoyao_top',
+        'tina_suck', 'tina_bat', 'tina_shot', 'tina_scepter', 'tina_p1', 'tina_p2', 'tina_p3',
+        'jianqing_mirror_def', 'jianqing_mirror_sword', 'jianqing_mirror_borrow',
+        'jianqing_takeoff', 'jianqing_transform', 'jianqing_feather'];
+      const bad = twelve.filter(id => {
+        const sk = mods.skills.getSkill(id);
+        return !sk || !sk.desc || !sk.descDetail || sk.descDetail.length <= sk.desc.length;
+      });
+      check('桃夭 5 + 缇娜 7 + 见晴 6 个技能都是"简要短、详细长"两套齐全', bad.length === 0,
+        bad.length ? '有问题：' + bad.join('、') : `${twelve.length} 个都对`);
+    }
+
     /* 换回简要，别影响后面的测试 */
     P._resetPrefsCache();
     P.setSkillDetail(false);

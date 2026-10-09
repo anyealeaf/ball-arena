@@ -847,8 +847,9 @@ export const SKILL_RONG = {
     const P = TAOYAO.rong;
     return ((unit.flags.rongShots || 0) + 1 > P.burstEvery) ? 1 : 0;
   },
-  desc: '每1秒发射一支粉色的箭矢，箭矢移动速度为500，造成50伤害。' +
-        '射击五次后，下一次会连续发射5发箭矢，每支伤害降低到30。',
+  /* 简要描述 = **作者给的官方措辞**（2026-10 定稿），不要在这里加数值细节 ——
+     要展开机制与数字请改 descDetail（图鉴里有"简要 / 详细"切换）。 */
+  desc: '每秒射一根箭，射五次后下一发变为五连发散射。',
   descDetail: `每 ${TAOYAO.rong.cd} 秒瞄准最近的敌人发射一支粉色箭矢` +
         `（速度 ${TAOYAO.rong.speed}，伤害 ${TAOYAO.rong.damage}，**没有击退**）。` +
         `射出 ${TAOYAO.rong.burstEvery} 支之后，下一轮改为**一次齐射 ${TAOYAO.rong.burstCount} 支**` +
@@ -901,8 +902,7 @@ export const SKILL_KU = {
      荣是 0（普通）/ 1（五连发），所以变体号同时也是"换哪张弓"的索引，
      两边共用 balls.js 的 bow.kindArt 那张表。 */
   castKind() { return 2; },
-  desc: '每2秒发射一支黑白色的箭矢，箭矢移动速度为450，造成65伤害，' +
-        '被命中后的小球移动速度减少20，持续2秒。',
+  desc: '每两秒射一根箭，命中后造成两秒的减速。',
   descDetail: `每 ${TAOYAO.ku.cd} 秒瞄准最近的敌人发射一支黑白箭矢` +
         `（速度 ${TAOYAO.ku.speed}，伤害 ${TAOYAO.ku.damage}）。` +
         `命中后目标移动速度 −${TAOYAO.ku.slow}，持续 ${TAOYAO.ku.slowSeconds} 秒（可刷新）。` +
@@ -964,8 +964,7 @@ export const SKILL_KU = {
 export const SKILL_AIM = {
   id: 'taoyao_aim',
   name: '认真拉矢',
-  desc: '被动技能，每次箭矢命中后，下一发箭矢伤害提高5点，最多叠加十层，' +
-        '箭矢落空之后会降低两层层数。',
+  desc: '被动技能。每次箭矢命中叠加五点伤害，最多叠加十层，箭矢落空后降低两层。',
   descDetail: `被动。每支箭矢**命中**后层数 +1（下一发伤害 +${TAOYAO.aim.perStack}），` +
         `最多 ${TAOYAO.aim.maxStacks} 层（即最多 +${TAOYAO.aim.maxStacks * TAOYAO.aim.perStack} 伤害）；` +
         `箭矢**落空**（撞墙或到寿命都没碰到球）时层数 −${TAOYAO.aim.losePerMiss}，最低 0 层。` +
@@ -982,8 +981,7 @@ export const SKILL_AIM = {
 export const SKILL_CHUNJING = {
   id: 'taoyao_chunjing',
   name: '春景',
-  desc: '每隔10秒对自己施加一次持续5秒的"春景"buff，在buff下，' +
-        '桃夭每秒恢复10点生命值，每2.5秒额外发射一次淡粉色的光炮，光炮伤害为180。',
+  desc: '每隔十秒为自己施加五秒的“春景”buff，每秒回复10点生命，每2.5秒发射一次光炮。',
   descDetail: `每 ${TAOYAO.chunjing.cd} 秒给自己施加一次「春景」，持续 ${TAOYAO.chunjing.duration} 秒。` +
         `buff 期间：每秒回复 ${TAOYAO.chunjing.healPerSec} 点生命（回复量用余数累积，` +
         `不会因为每帧不足 1 点而回不上血）；` +
@@ -1037,8 +1035,7 @@ export const SKILL_CHUNJING = {
 export const SKILL_TOP = {
   id: 'taoyao_top',
   name: '陀螺',
-  desc: '被攻击时，桃夭的小球会开始旋转，转速会进行叠加，最多叠加10层。' +
-        '每层会使桃夭碰撞伤害提升2点，移动速度提升2点。',
+  desc: '被攻击后，桃夭会开始旋转，最多叠加十层，增加桃夭的碰撞伤害和移动速度。',
   descDetail: `被攻击时叠一层，最多 ${TAOYAO.top.maxStacks} 层（被打得越多转得越快）。` +
         `每层：碰撞伤害 +${TAOYAO.top.meleePer}、移动速度 +${TAOYAO.top.speedPer}。` +
         `满层时 +${TAOYAO.top.meleePer * TAOYAO.top.maxStacks} 碰撞伤害、` +
@@ -1422,11 +1419,8 @@ function stealAndCast(battle, tina) {
 export const SKILL_TINA_SUCK = {
   id: 'tina_suck',
   name: '吸血习性',
-  desc: '碰撞伤害降低到30，但是碰撞后会吸附在对方小球身上1.5秒，' +
-        '这期间对方小球无法使用技能（除碰撞墙体使用的技能以外），移速降低一半。' +
-        '同时，在这1.5秒内，会造成3次缇娜的碰撞伤害，缇娜会回复对应数值的生命值。' +
-        '并且缇娜自己在这段时间不会受到碰撞伤害。回复数值不会超过缇娜的生命上限。' +
-        '吸附结束后有1秒的间隔，期间不会再次吸附。',
+  desc: '碰撞伤害降低到30，碰撞时吸附1.5秒，造成3次碰撞伤害并百分百吸血。' +
+        '回复不会超过缇娜生命上限。',
   descDetail: `碰撞伤害被**锁死在 ${TINA.suck.meleeTo}**（权杖的 +${TINA.scepter.meleeBonus} 不影响它）。` +
         `撞到敌方小球后吸附在它身上 ${TINA.suck.holdSeconds} 秒，期间：` +
         `目标**无法发动技能**（撞墙类除外）、移速 ×${TINA.suck.targetSpeedMul}；` +
@@ -1489,13 +1483,8 @@ export const SKILL_TINA_SUCK = {
 export const SKILL_TINA_BAT = {
   id: 'tina_bat',
   name: '蝙蝠',
-  desc: '每3秒释放带有追踪能力的3~5只小蝙蝠，每只蝙蝠在追踪时最多进行60度的偏转，' +
-        '蝙蝠命中后对敌方小球造成6点伤害，随后会返回缇娜身上，' +
-        '每只蝙蝠返回会恢复缇娜3点生命值，并提供一点魔力计数。' +
-        '魔力计数满5点后，根据蝙蝠最后命中的目标，缇娜会随机抽取其一个技能' +
-        '（不会释放领域类、近战类、以及碰撞墙壁类的技能）释放一次；' +
-        '若抽到的是持续发动型的能力（见晴的水镜 / 变身等），则改为借用该能力5秒；' +
-        '抽到起飞则立刻起飞，抽到「我很可爱」则立刻发一根羽毛。',
+  desc: '每3秒释放3~5只蝙蝠，每只造成6点伤害，恢复3点生命值。' +
+        '累计命中五次后，缇娜复制一次最后命中目标的随机技能。',
   descDetail: `每 ${TINA.bat.cd} 秒放出一批 **${TINA.bat.minCount}~${TINA.bat.maxCount} 只**小蝙蝠，` +
         `朝最近的敌人追踪：速度 ${TINA.bat.speed}，**每秒最多偏转 ${TINA.bat.turnPerSec}°**` +
         `（是"转速上限"而不是"总偏角上限"——追不到就会绕圈追）。` +
@@ -1533,8 +1522,7 @@ export const SKILL_TINA_BAT = {
 export const SKILL_TINA_SHOT = {
   id: 'tina_shot',
   name: '魔力霰弹',
-  desc: '对着敌方小球在0.5秒内连续发射三个猩红色魔弹，发射间隔为2秒，' +
-        '每颗魔弹发射时都会随机出现0~15°的角度偏差，每颗魔弹伤害为30.',
+  desc: '三连发的魔力弹，间隔2秒，但是准头不太好。',
   descDetail: `每 ${TINA.shot.cd} 秒打出一轮 **${TINA.shot.count} 发**：` +
         `第 1 发立刻出手，其余两发在 ${TINA.shot.windowSeconds} 秒内均匀打完（间隔 ${(TINA.shot.windowSeconds / (TINA.shot.count - 1)).toFixed(2)} 秒）。` +
         `每发在瞄准方向上随机偏 **0~${TINA.shot.spreadDeg}°**，每发 ${TINA.shot.damage} 伤害` +
@@ -1594,8 +1582,7 @@ function fireShot(battle, unit, target) {
 export const SKILL_TINA_SCEPTER = {
   id: 'tina_scepter',
   name: '权杖',
-  desc: '碰撞伤害提高15点（不影响吸血习性的碰撞伤害），' +
-        '魔力霰弹和蝙蝠的伤害各提高三分之一，且增加30°的追踪偏转角。',
+  desc: '增加15点碰撞伤害，魔力霰弹和蝙蝠的伤害提高，准度提高。',
   descDetail: `被动。碰撞伤害 **+${TINA.scepter.meleeBonus}**（${50} → ${50 + TINA.scepter.meleeBonus}）——` +
         `但如果同时装了「吸血习性」，碰撞伤害仍是被锁死的 ${TINA.suck.meleeTo}，这 +15 不生效。` +
         `「魔力霰弹」与「蝙蝠」的伤害各 **×4/3**` +
@@ -1617,8 +1604,7 @@ export const SKILL_TINA_P1 = {
   id: 'tina_p1',
   name: '公主传承1',
   group: 'princess',
-  desc: '每隔10秒使用一次，造成持续3秒的时间停止，表现为全场除了缇娜以外的球全部褪色，' +
-        '此时场上除了缇娜以及缇娜技能产出的攻击外，所有小球和攻击均不会移动。',
+  desc: '每10秒可以使用一次，时停3秒。',
   descDetail: `每 ${TINA.p1.cd} 秒发动一次**时间停止**，持续 ${TINA.p1.duration} 秒。` +
         `表现：除缇娜外的球**全部褪色**（渲染层按快照里的豁免者下标做灰度）。` +
         `效果（作者确认过的口径）：除缇娜自己与她的技能产物外，` +
@@ -1637,8 +1623,7 @@ export const SKILL_TINA_P2 = {
   id: 'tina_p2',
   name: '公主传承2',
   group: 'princess',
-  desc: '每隔10秒使用一次，缇娜瞬间发动一次蝙蝠（不论有没有携带），' +
-        '然后瞬移到锁定的小球边上进行碰撞（如果携带了吸血习性，则会直接吸附吸血）。',
+  desc: '每10秒可以使用一次，发动一次蝙蝠（不论是否携带）并瞬移到锁定的小球边上。',
   descDetail: `每 ${TINA.p2.cd} 秒发动一次：先**立刻放出一只蝙蝠**（即使没装「蝙蝠」也会放），` +
         `然后**瞬移**到锁定目标的旁边、贴上去撞一下。` +
         `如果装了「吸血习性」，这次撞击直接进入**吸附吸血**（省掉"撞上了才算"的随机性）。` +
@@ -1668,9 +1653,7 @@ export const SKILL_TINA_P3 = {
   id: 'tina_p3',
   name: '公主传承3',
   group: 'princess',
-  desc: '每隔10秒使用一次，缇娜蓄力1秒后持续发射一条直径与小球一致的猩红色光柱，' +
-        '光柱为笔直圆柱体，一端始终在缇娜上，会随着锁定目标的移动转向。' +
-        '光柱持续2秒，每秒造成3次攻击判定，每次攻击判定造成35点伤害。',
+  desc: '蓄力一秒后射一发大的，持续两秒，造成最高210点伤害。',
   descDetail: `每 ${TINA.p3.cd} 秒发动一次：蓄力 ${TINA.p3.chargeSeconds} 秒后，` +
         `从缇娜身上射出一条**锚定的**猩红光柱，持续 ${TINA.p3.durationSeconds} 秒。` +
         `光柱直径 ${TINA.p3.radius * 2}（与小球直径一致），一端**始终钉在缇娜身上**，` +
@@ -1747,8 +1730,8 @@ export const SKILL_TINA_P3 = {
 export const SKILL_MIRROR_DEF = {
   id: 'jianqing_mirror_def',
   name: '水镜·魔力共鸣（防御）',
-  desc: '每五秒切换一次水镜的颜色：淡绿色时每秒回复 15 点生命；' +
-        '淡粉色时造成的碰撞伤害提高 10，每秒生成一个可以抵挡 30 点伤害的护盾。',
+  desc: '每5秒随机切换一次颜色。淡绿色时每秒回复15点生命值，淡粉色时每秒获得30点护盾，上限300。' +
+        '切换回淡绿色时，护盾会每秒衰减5点。',
   descDetail: `每 ${JIANQING.mirrorDef.cycle} 秒**随机**切一次颜色（淡绿 / 淡粉），` +
         `允许连续切到同一个颜色。切换时见晴身前张开一副水镜，她穿过水镜，小球边缘那一圈随之换色。\n` +
         `· 淡绿色：每秒回复 ${JIANQING.mirrorDef.healPerSec} 点生命。\n` +
@@ -1884,9 +1867,8 @@ export const SKILL_MIRROR_DEF = {
 export const SKILL_MIRROR_SWORD = {
   id: 'jianqing_mirror_sword',
   name: '水镜·魔力共鸣（猩红色）',
-  desc: '移动速度提高 10，小球边缘绑定一柄猩红色的长剑；' +
-        '移动方向前方 120° 出现敌方小球时挥剑造成 80 点伤害，' +
-        '出现敌方魔弹时也会挥剑消除（最多 3 个）。',
+  desc: '移动速度+10，获得一把80伤害的大宝剑，挥动间隔1秒；' +
+        '前方出现敌方弹道时，会挥剑至多消除三个弹道，间隔2.5秒。',
   descDetail: `常驻：移动速度 +${JIANQING.mirrorSword.speedBonus}；` +
         `小球边缘绑着一柄猩红色长剑，长度等于小球直径（${JIANQING.mirrorSword.swordLen} 世界单位）。\n` +
         `· **攻击性挥动**：见晴**移动方向**的前方 ${JIANQING.mirrorSword.frontDeg}° 扇形里` +
@@ -2005,9 +1987,11 @@ export const SKILL_MIRROR_SWORD = {
    放 onThink 还有个好处：起飞期间会被自动拦掉（"空中不发动攻击"）。 */
 export const SKILL_MIRROR_BORROW = {
   id: 'jianqing_mirror_borrow',
-  name: '水镜·魔力共鸣（深蓝紫与白）',
-  desc: '每九秒切换一次水镜的颜色：深蓝紫色时获得晕彩的魔弹（深紫、没有激光），' +
-        '白色时获得魔弹中的激光攻击能力（白色）。',
+  name: '水镜·魔力共鸣（攻击）',
+  /* 简要描述 = 作者给的官方措辞（2026-10 定稿；这一版把名字从
+     "（深蓝紫与白）"改成了"（攻击）"，因为是他在这一轮明确要改的）。 */
+  desc: '每9秒随机切换一次颜色。深蓝紫色时发射75点伤害的魔弹，一个周期内最多发射4发；' +
+        '白色时发射170点伤害的激光，一个周期内最多发射3发。',
   descDetail: `每 ${JIANQING.mirrorBorrow.cycle} 秒**随机**切一次颜色（深蓝紫 / 白），` +
         `允许连续切到同一个颜色。\n` +
         `· 深蓝紫色：借来晕彩的**魔弹**（深紫色特效，**没有第三发激光**）：` +
@@ -2083,10 +2067,9 @@ export const SKILL_MIRROR_BORROW = {
 export const SKILL_TAKEOFF = {
   id: 'jianqing_takeoff',
   name: '起飞',
-  desc: '移动一定距离后拍打翅膀飞到空中：虚化并变大、移动速度提高 150，持续四秒；' +
-        '期间受到的伤害减半、只与墙壁发生碰撞（可以穿过小球，每帧对重合的小球造成伤害），' +
-        '并且持续修正航向追踪敌人；其它技能照常可用。' +
-        '每次飞完，速度永久 +5、下次飞行的帧伤 +0.5（可叠加）。',
+  desc: '累计移动1560世界单位后起飞，滞空4秒，期间移动速度+150，受到所有伤害减半，' +
+        '不与任何小球碰撞，会在碰撞墙壁后自动追踪最近的敌人。' +
+        '起飞时每帧对接触的敌人造成5点帧伤，降落后永久提升移速与之后起飞的帧伤。',
   descDetail: `累计移动 ${JIANQING.takeoff.distance} 世界单位后起飞，滞空 ` +
         `${JIANQING.takeoff.seconds} 秒（表现：虚化、变大，球下方出现影子 —— 近大远小）。\n` +
         `空中：移动速度 +${JIANQING.takeoff.speedBonus}；**受到的所有伤害减半**；` +
@@ -2230,8 +2213,7 @@ function landFlight(battle, unit) {
 export const SKILL_TRANSFORM = {
   id: 'jianqing_transform',
   name: '精灵变身',
-  desc: '见晴变成精灵形态：体型变为一半、移动速度提高 50，但造成的所有伤害减半，' +
-        '猩红长剑的长度也减半。',
+  desc: '见晴体型变小，造成的所有伤害减少，移动速度大幅增加。',
   descDetail: `装备即生效（永久）：\n` +
         `· 体型变为 ${JIANQING.transform.sizeMul * 100}%（判定与显示一起变，长剑也随之减半）；\n` +
         `· 移动速度 +${JIANQING.transform.speedBonus}；\n` +
@@ -2285,8 +2267,7 @@ export const SKILL_TRANSFORM = {
 export const SKILL_FEATHER = {
   id: 'jianqing_feather',
   name: '我很可爱',
-  desc: '每当见晴的生命值下降 300 时，发射一根持续追踪、可以被墙壁反弹的羽毛；' +
-        '被羽毛命中的小球移动速度减半（3 秒），碰撞伤害与技能伤害各降低 5 点（可叠加）。',
+  desc: '累计受到300点伤害后发射一根追踪羽毛，被命中的小球在3秒内移速减半，伤害永久降低。',
   descDetail: `每累计受到 ${JIANQING.feather.hpStep} 点伤害就发射一根羽毛` +
         `（速度 ${JIANQING.feather.speed}，持续追踪最近的敌人，可以被墙壁反弹 ` +
         `${JIANQING.feather.bounces} 次）。\n` +
